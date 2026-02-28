@@ -1,5 +1,13 @@
-// ====== CONFIG ======
-const GOLDAPI_KEY = "goldapi-jemsmm6x5l5r-io";
+/**
+ * Free-data mode (no GoldAPI):
+ * - Gold spot (XAU/USD) current: metals.live (no key)
+ * - FX rates/history: frankfurter.app (no key, daily)
+ *
+ * Note about 30-day chart:
+ * - We store daily gold-usd points locally (1 point/day when refreshed).
+ * - FX series is fetched for last 30 days and used to convert those points into selected currency.
+ */
+
 const DEFAULT_CURRENCY = "USD";
 const DEFAULT_KARAT = 24;
 
@@ -13,19 +21,31 @@ const GCC = [
 ];
 
 const CURRENCIES = [{ code: "USD", name: "US Dollar", flag: "🇺🇸" }, ...GCC];
-const GOLDAPI_BASE = "https://www.goldapi.io/api";
 
 const state = {
   currency: localStorage.getItem("currency") || DEFAULT_CURRENCY,
   karat: Number(localStorage.getItem("karat") || DEFAULT_KARAT),
+
+  // current 24k price per gram in selected currency
   price24PerGram: Number(localStorage.getItem("price24PerGram") || 0),
-  history24PerGram: JSON.parse(localStorage.getItem("history24PerGram") || "[]"),
+
+  // history points are stored as daily gold price in USD per gram:
+  // [{ date: "YYYY-MM-DD", usdPerGram24: number }]
+  goldUsdHistory: JSON.parse(localStorage.getItem("goldUsdHistory") || "[]"),
+
   lastUpdated: localStorage.getItem("lastUpdated") || ""
 };
 
 const $ = (id) => document.getElementById(id);
-
 let chart;
+
+function persistState() {
+  localStorage.setItem("currency", state.currency);
+  localStorage.setItem("karat", String(state.karat));
+  localStorage.setItem("price24PerGram", String(state.price24PerGram || 0));
+  localStorage.setItem("goldUsdHistory", JSON.stringify(state.goldUsdHistory || []));
+  localStorage.setItem("lastUpdated", state.lastUpdated || "");
+}
 
 function fmtMoney(value, currency) {
   if (!Number.isFinite(value)) return "—";
@@ -58,14 +78,6 @@ function showView(which) {
   if (which === "home") $("viewHome")?.classList.add("view-active");
   if (which === "calc") $("viewCalc")?.classList.add("view-active");
   if (which === "currency") $("viewCurrency")?.classList.add("view-active");
-}
-
-function persistState() {
-  localStorage.setItem("currency", state.currency);
-  localStorage.setItem("karat", String(state.karat));
-  localStorage.setItem("price24PerGram", String(state.price24PerGram || 0));
-  localStorage.setItem("history24PerGram", JSON.stringify(state.history24PerGram || []));
-  localStorage.setItem("lastUpdated", state.lastUpdated || "");
 }
 
 function updateTotal() {
@@ -103,6 +115,7 @@ function renderCurrencyList() {
       state.currency = c.code;
       persistState();
       applyUI();
+      // recalc current from stored USD price (if any) using latest FX
       await refreshAll();
       showView("home");
     });
@@ -110,15 +123,88 @@ function renderCurrencyList() {
   });
 }
 
-function renderChart() {
+function yyyyMmDd(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function lastNDaysRange(days) {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(end.getDate() - (days - 1));
+  return { start: yyyyMmDd(start), end: yyyyMmDd(end) };
+}
+
+// ----- FX (Frankfurter) -----
+// Frankfurter base is EUR. We'll compute USD->X using EURUSD and EURX.
+async function fetchFrankfurterSeries({ start, end }, symbolsCsv) {
+  const url = `https://api.frankfurter.app/${start}..${end}?from=EUR&to=${encodeURIComponent(symbolsCsv)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`FX error ${res.status}`);
+  return res.json();
+}
+
+function fxUsdToTargetOnDate(ratesByDate, date, target) {
+  if (target === "USD") return 1;
+
+  const day = ratesByDate[date];
+  if (!day) return null;
+
+  const eurToUsd = day["USD"];
+  const eurToT = day[target];
+
+  if (!Number.isFinite(eurToUsd) || !Number.isFinite(eurToT)) return null;
+
+  // 1 USD = (1/eurToUsd) EUR, then * eurToT = target
+  return eurToT / eurToUsd;
+}
+
+// ----- Gold (metals.live) -----
+// metals.live returns XAU spot in USD per ounce (usually).
+async function fetchGoldUsdPerOunce() {
+  const res = await fetch("https://api.metals.live/v1/spot");
+  if (!res.ok) throw new Error(`Gold spot error ${res.status}`);
+
+  const json = await res.json();
+  // Example format commonly: [["gold", 2034.12], ["silver", 24.33], ...]
+  const goldRow = Array.isArray(json) ? json.find(r => r?.[0] === "gold") : null;
+  const usdPerOunce = goldRow?.[1];
+
+  if (!Number.isFinite(usdPerOunce)) {
+    throw new Error("Gold spot response missing gold price");
+  }
+
+  return usdPerOunce;
+}
+
+function ounceToGram(usdPerOunce) {
+  // troy ounce
+  return usdPerOunce / 31.1034768;
+}
+
+function upsertDailyGoldUsdPoint(dateStr, usdPerGram24) {
+  const arr = Array.isArray(state.goldUsdHistory) ? state.goldUsdHistory : [];
+  const idx = arr.findIndex(p => p.date === dateStr);
+  const point = { date: dateStr, usdPerGram24 };
+  if (idx >= 0) arr[idx] = point;
+  else arr.push(point);
+
+  // keep last 60 points max
+  arr.sort((a,b) => a.date.localeCompare(b.date));
+  state.goldUsdHistory = arr.slice(-60);
+}
+
+// ----- Chart -----
+function renderChartFromHistoryConverted(historyConverted) {
   const canvas = $("priceChart");
   if (!canvas || typeof Chart === "undefined") return;
 
   const ctx = canvas.getContext("2d");
-  const factor = karatFactor(state.karat);
 
-  const labels = (state.history24PerGram || []).map(p => p.date);
-  const data = (state.history24PerGram || []).map(p => p.value * factor);
+  const labels = historyConverted.map(p => p.label);
+  const data = historyConverted.map(p => p.value);
 
   const config = {
     type: "line",
@@ -170,59 +256,48 @@ function applyUI() {
   setActiveKaratButtons();
   updateTotal();
   renderCurrencyList();
-  renderChart();
 }
 
-async function goldApiFetch(path) {
-  const res = await fetch(`${GOLDAPI_BASE}${path}`, {
-    headers: { "x-access-token": GOLDAPI_KEY, "Content-Type": "application/json" }
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`GoldAPI error ${res.status}: ${text}`);
-  }
-  return res.json();
-}
-
-async function fetchCurrent24kPerGram(currency) {
-  const json = await goldApiFetch(`/XAU/${currency}`);
-  const price = json.price ?? json.ask ?? json.bid;
-  const unit = (json.unit || "ounce").toLowerCase();
-  if (!Number.isFinite(price)) throw new Error("GoldAPI response missing price");
-  return unit.includes("gram") ? price : price / 31.1034768;
-}
-
-async function fetchHistory24kPerGram(currency, days = 30) {
-  const points = [];
-  const today = new Date();
-
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    const dateStr = `${yyyy}-${mm}-${dd}`;
-
-    const json = await goldApiFetch(`/XAU/${currency}/${dateStr}`);
-    const price = json.price ?? json.ask ?? json.bid;
-    const unit = (json.unit || "ounce").toLowerCase();
-    if (!Number.isFinite(price)) continue;
-
-    const perGram = unit.includes("gram") ? price : price / 31.1034768;
-    points.push({ date: dateStr.slice(5), value: perGram });
-  }
-
-  return points;
-}
-
+// ----- Main refresh -----
 async function refreshAll() {
   const btn = $("btnRefresh");
   try {
-    btn.textContent = "Refreshing...";
+    if (btn) btn.textContent = "Refreshing...";
 
-    state.price24PerGram = await fetchCurrent24kPerGram(state.currency);
-    state.history24PerGram = await fetchHistory24kPerGram(state.currency, 30);
+    // 1) Gold current in USD
+    const usdPerOunce = await fetchGoldUsdPerOunce();
+    const usdPerGram24 = ounceToGram(usdPerOunce);
+
+    // 2) FX for today (and 30 day series for chart conversion)
+    const { start, end } = lastNDaysRange(30);
+    const symbols = ["USD", ...GCC.map(x => x.code)].join(",");
+    const fx = await fetchFrankfurterSeries({ start, end }, symbols);
+
+    const today = yyyyMmDd(new Date());
+
+    // store today's gold point
+    upsertDailyGoldUsdPoint(today, usdPerGram24);
+
+    // current conversion
+    const usdToTarget = fxUsdToTargetOnDate(fx.rates, Object.keys(fx.rates).slice(-1)[0], state.currency) ?? 1;
+    state.price24PerGram = usdPerGram24 * usdToTarget;
+
+    // 3) Build chart from locally stored gold points intersected with FX dates
+    const factor = karatFactor(state.karat);
+    const history = (state.goldUsdHistory || []).slice(-30);
+
+    const converted = history
+      .map(p => {
+        const rate = fxUsdToTargetOnDate(fx.rates, p.date, state.currency);
+        if (!Number.isFinite(rate)) return null;
+        return {
+          label: p.date.slice(5), // MM-DD
+          value: p.usdPerGram24 * rate * factor
+        };
+      })
+      .filter(Boolean);
+
+    renderChartFromHistoryConverted(converted);
 
     state.lastUpdated = new Date().toLocaleString();
     persistState();
@@ -231,10 +306,11 @@ async function refreshAll() {
     console.error(e);
     alert(String(e.message || e));
   } finally {
-    btn.textContent = "Refresh";
+    if (btn) btn.textContent = "Refresh";
   }
 }
 
+// ----- Events -----
 document.addEventListener("click", (e) => {
   const t = e.target;
   if (t?.id === "btnCalc") showView("calc");
@@ -247,15 +323,17 @@ document.addEventListener("click", (e) => {
       state.karat = k;
       persistState();
       applyUI();
+      // re-render chart with new karat factor on next refresh; or just refresh now
+      refreshAll();
     }
   }
 });
 
-$("btnRefresh").addEventListener("click", refreshAll);
-$("gramsInput").addEventListener("input", updateTotal);
+$("btnRefresh")?.addEventListener("click", refreshAll);
+$("gramsInput")?.addEventListener("input", updateTotal);
 
 (function init(){
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(console.warn);
   applyUI();
-  if (!state.price24PerGram || !state.history24PerGram?.length) refreshAll();
+  refreshAll();
 })();
