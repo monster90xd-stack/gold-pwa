@@ -1,14 +1,120 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="en" dir="ltr">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="styles.css">
-    <title>GCC Gold Calculator</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="description" content="GCC Gold Calculator / حاسبة الذهب للخليج" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+  <link rel="stylesheet" href="./styles.css" />
+  <title>GCC Gold Calculator</title>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
-    <h1>GCC Gold Calculator</h1>
-    <div id="result"></div>
-    <script src="app.js"></script>
+  <header class="topbar">
+    <button id="btnCalc" class="icon-btn" aria-label="Calculator" title="Calculator">🧮</button>
+    <div class="title">
+      <div class="title-en">GCC Gold Calculator</div>
+      <div class="title-ar" lang="ar" dir="rtl">حاسبة الذهب للخليج</div>
+    </div>
+    <button id="btnCurrency" class="icon-btn" aria-label="Currency" title="Currency">💱</button>
+  </header>
+
+  <main class="main">
+    <section id="viewHome" class="view view-active">
+      <div class="card">
+        <div class="row row-space">
+          <div class="muted">Currency: <span id="currencyLabel" class="pill"></span></div>
+          <div class="muted">Updated: <span id="updatedLabel"></span></div>
+        </div>
+
+        <div class="karat-row" role="group" aria-label="Karat selector">
+          <button class="karat-btn" data-karat="18">18K</button>
+          <button class="karat-btn" data-karat="21">21K</button>
+          <button class="karat-btn" data-karat="22">22K</button>
+          <button class="karat-btn" data-karat="24">24K</button>
+        </div>
+
+        <div class="price-row">
+          <div class="big">
+            <span id="pricePerGramLabel">—</span>
+            <span class="muted small">/ gram</span>
+          </div>
+        </div>
+
+        <div class="chart-wrap">
+          <canvas id="priceChart" height="140"></canvas>
+        </div>
+
+        <div class="row row-space small muted">
+          <span>Range: 30 days</span>
+          <button id="btnRefresh" class="link-btn">Refresh</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="viewCalc" class="view">
+      <div class="card">
+        <div class="row row-space">
+          <h2 class="h2">Calculator</h2>
+          <button class="link-btn" data-nav="home">Back</button>
+        </div>
+
+        <div class="field">
+          <label class="label">Karat</label>
+          <div class="karat-row" role="group" aria-label="Karat selector (calculator)">
+            <button class="karat-btn" data-karat="18">18K</button>
+            <button class="karat-btn" data-karat="21">21K</button>
+            <button class="karat-btn" data-karat="22">22K</button>
+            <button class="karat-btn" data-karat="24">24K</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="label">Current price per gram (<span id="calcCurrencyLabel"></span>)</label>
+          <div class="big"><span id="calcPricePerGramLabel">—</span></div>
+        </div>
+
+        <div class="field">
+          <label class="label" for="gramsInput">Grams</label>
+          <input id="gramsInput" class="input" inputmode="decimal" placeholder="e.g. 10.5" />
+        </div>
+
+        <div class="field result">
+          <div class="muted">Total</div>
+          <div class="big"><span id="totalLabel">—</span></div>
+        </div>
+
+        <div class="muted small">
+          Formula: total = grams × (price24KPerGram × karat/24)
+        </div>
+      </div>
+    </section>
+
+    <section id="viewCurrency" class="view">
+      <div class="card">
+        <div class="row row-space">
+          <h2 class="h2">Currency (GCC)</h2>
+          <button class="link-btn" data-nav="home">Back</button>
+        </div>
+
+        <div class="list" id="currencyList"></div>
+
+        <div class="muted small">
+          Default currency is USD. Gold price is fetched in the selected currency.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="adbar">
+    <div class="ad-placeholder">Ads banner placeholder</div>
+  </footer>
+
+  <script src="./app.js"></script>
 </body>
 </html>
