@@ -179,7 +179,8 @@ body{
 .check{color:var(--accent);font-weight:900;font-size:18px}
 
 .chart-card{margin-top:14px}
-.chart-wrap{height:280px}
+.chart-wrap{height:320px}
+
 
 /* Bottom Ad Bar */
 .adbar{
@@ -222,7 +223,10 @@ body{
   font-weight:900;
   font-size:14px;
 }
-@media (max-width: 360px){
-  .ad-placeholder{width:300px}
-  .big{font-size:28px}
+@media (max-width: 480px){
+  .container{padding: 14px}
+  .card{padding: 14px}
+  .big{font-size: 28px}
+  .tab{padding: 12px 12px}
+  .chart-wrap{height: 340px}
 }
