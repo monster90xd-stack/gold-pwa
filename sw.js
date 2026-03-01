@@ -1,5 +1,5 @@
-// Bump cache name to ensure clients update to the new app.js
-const CACHE_NAME = "gcc-gold-pwa-v7";
+// UPDATED sw.js (cache-bust)
+const CACHE_NAME = "gcc-gold-pwa-v8";
 
 const ASSETS = [
   "./",
