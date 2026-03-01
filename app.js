@@ -1,8 +1,9 @@
-// GCC Gold - uses Cloudflare Worker proxy (cached MetalpriceAPI).
-// Auto-refresh every 10 minutes; no refresh button; Arabic toggle button.
-// Uses Metalprice rates:
-// - rates.USDXAU = USD per 1 XAU (troy ounce)
-// - rates.<CUR>  = CUR per 1 USD (because base=USD)
+// UPDATED app.js
+// Changes:
+// 1) Chart updates immediately when currency changes (without waiting for refresh):
+//    - store USD 24k/gram in history points and convert for display.
+// 2) Mobile-friendly UI: (handled in styles.css below) + minor tweaks here.
+// 3) Ad section handled in index.html + styles.css (below).
 
 const METALPRICE_PROXY_URL = "https://gcc-gold-cache.monster-90xd.workers.dev/latest";
 
@@ -30,10 +31,15 @@ const state = {
   karat: Number(localStorage.getItem("karat") || DEFAULTS.karat),
   lang: localStorage.getItem("lang") || DEFAULTS.lang,
 
+  // latest USD->currency rate (CUR per USD)
+  usdToCurrency: Number(localStorage.getItem("usdToCurrency") || 1),
+
+  // current 24k per gram in selected currency (derived)
   price24PerGram: 0,
   lastUpdated: localStorage.getItem("lastUpdated") || "",
 
-  // store recent points for chart
+  // store recent points in USD per gram (24k) so we can re-convert on currency change instantly:
+  // [{ t: epochMs, usdPerGram24: number }]
   history: JSON.parse(localStorage.getItem("history") || "[]")
 };
 
@@ -45,6 +51,7 @@ function persist() {
   localStorage.setItem("currency", state.currency);
   localStorage.setItem("karat", String(state.karat));
   localStorage.setItem("lang", state.lang);
+  localStorage.setItem("usdToCurrency", String(state.usdToCurrency || 1));
   localStorage.setItem("lastUpdated", state.lastUpdated || "");
   localStorage.setItem("history", JSON.stringify(state.history || []));
 }
@@ -68,8 +75,8 @@ function setActiveKaratButtons() {
   document.querySelectorAll(".karat-btn").forEach((btn) => {
     btn.classList.toggle("active", Number(btn.dataset.karat) === state.karat);
   });
-  const k1 = $("karatLabel"); if (k1) k1.textContent = String(state.karat);
-  const k2 = $("calcKaratLabel"); if (k2) k2.textContent = String(state.karat);
+  $("karatLabel") && ($("karatLabel").textContent = String(state.karat));
+  $("calcKaratLabel") && ($("calcKaratLabel").textContent = String(state.karat));
 }
 
 function showView(tab) {
@@ -119,8 +126,13 @@ function renderCurrencyList() {
     div.addEventListener("click", async () => {
       state.currency = c.code;
       persist();
+
+      // Update UI + chart immediately using last known usdToCurrency (if present)
       applyUI();
+
+      // Then fetch fresh rates (optional but recommended)
       await refreshNow();
+
       showView("home");
     });
     list.appendChild(div);
@@ -136,12 +148,10 @@ async function fetchLatestRates() {
   return res.json();
 }
 
-function pushHistoryPoint(price24PerGram) {
+function pushHistoryPointUsd(usdPerGram24) {
   const now = Date.now();
   state.history = Array.isArray(state.history) ? state.history : [];
-  state.history.push({ t: now, price24PerGram });
-
-  // keep last 720 points (~5 days at 10-min)
+  state.history.push({ t: now, usdPerGram24 });
   state.history = state.history.slice(-720);
 }
 
@@ -152,9 +162,11 @@ function renderChart() {
   const ctx = canvas.getContext("2d");
   const factor = karatFactor(state.karat);
 
-  const points = (state.history || []).slice(-144); // ~24h view
+  const points = (state.history || []).slice(-144);
   const labels = points.map(p => new Date(p.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
-  const data = points.map(p => p.price24PerGram * factor);
+
+  // Convert USD->selected currency for display
+  const data = points.map(p => p.usdPerGram24 * state.usdToCurrency * factor);
 
   const config = {
     type: "line",
@@ -209,7 +221,6 @@ function applyTranslations() {
   $("lblCurrency").textContent = isAr ? "العملة" : "Currency";
   $("btnCurrency").textContent = isAr ? "تغيير" : "Change";
 
-  // safer than manipulating childNodes directly
   $("lblUpdatedWrap").innerHTML = isAr
     ? `آخر تحديث: <span id="updatedLabel">${state.lastUpdated || "—"}</span>`
     : `Last updated: <span id="updatedLabel">${state.lastUpdated || "—"}</span>`;
@@ -223,6 +234,10 @@ function applyTranslations() {
   $("btnBackHome1").textContent = isAr ? "رجوع" : "Back";
   $("lblChooseCurrency").textContent = isAr ? "اختر العملة" : "Choose currency";
   $("btnBackHome2").textContent = isAr ? "رجوع" : "Back";
+
+  // Ad label
+  const adTitle = $("adTitle");
+  if (adTitle) adTitle.textContent = isAr ? "إعلان" : "Ad";
 }
 
 function applyUI() {
@@ -232,7 +247,6 @@ function applyUI() {
   $("pricePerGramLabel").textContent = fmtMoney(perGramSelectedK, state.currency);
   $("calcPricePerGramLabel").textContent = fmtMoney(perGramSelectedK, state.currency);
 
-  // updatedLabel is recreated in applyTranslations, so set translations last
   setActiveKaratButtons();
   updateTotal();
   renderCurrencyList();
@@ -250,11 +264,13 @@ async function refreshNow() {
     const usdToCur = state.currency === "USD" ? 1 : json?.rates?.[state.currency];
     if (!Number.isFinite(usdToCur) || usdToCur <= 0) throw new Error(`Missing ${state.currency} rate`);
 
+    state.usdToCurrency = usdToCur;
+
     const usdPerGram24 = usdXau / TROY_OUNCE_GRAMS;
     state.price24PerGram = usdPerGram24 * usdToCur;
 
     state.lastUpdated = new Date().toLocaleString();
-    pushHistoryPoint(state.price24PerGram);
+    pushHistoryPointUsd(usdPerGram24);
 
     persist();
     applyUI();
@@ -293,7 +309,7 @@ function initEvents() {
     btn.addEventListener("click", () => {
       state.karat = Number(btn.dataset.karat);
       persist();
-      applyUI();
+      applyUI(); // chart changes immediately too
     });
   });
 
