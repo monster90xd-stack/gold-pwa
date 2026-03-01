@@ -1,3 +1,7 @@
+<!-- UPDATED index.html
+Changes:
+- Add bottom ad section that appears on every page (outside views)
+-->
 <!doctype html>
 <html lang="en">
 <head>
@@ -17,8 +21,6 @@
       <div id="appTitle" class="brand-title">GCC Gold</div>
       <div id="appSub" class="brand-sub" dir="rtl">حاسبة الذهب</div>
     </div>
-
-    <!-- Arabic toggle button (replaces Refresh) -->
     <button id="btnLang" class="btn btn-primary" type="button">العربية</button>
   </header>
 
@@ -29,7 +31,6 @@
       <button class="tab" data-tab="currency" type="button" id="tabCurrency">Currency</button>
     </nav>
 
-    <!-- HOME -->
     <section id="viewHome" class="view view-active">
       <div class="card">
         <div class="row space">
@@ -67,7 +68,6 @@
       </div>
     </section>
 
-    <!-- CALC -->
     <section id="viewCalc" class="view">
       <div class="card">
         <div class="row space">
@@ -91,7 +91,6 @@
       </div>
     </section>
 
-    <!-- CURRENCY -->
     <section id="viewCurrency" class="view">
       <div class="card">
         <div class="row space">
@@ -103,6 +102,17 @@
       </div>
     </section>
   </main>
+
+  <!-- Ad section (appears on every page) -->
+  <footer class="adbar" id="adBar">
+    <div class="ad-inner">
+      <div class="ad-title" id="adTitle">Ad</div>
+      <div class="ad-slot" id="adSlot">
+        <!-- Replace this div with AdMob/Google Ad code in your Android wrapper -->
+        <div class="ad-placeholder">320 × 50</div>
+      </div>
+    </div>
+  </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
   <script src="./app.js"></script>
