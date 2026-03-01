@@ -1,22 +1,13 @@
 /* GCC Gold PWA
- * Gold (USD/oz): metalpriceapi latest (USDXAU)
- * FX: frankfurter.app (ECB). NOTE: ECB does NOT provide all GCC currencies.
- * If a currency is missing from Frankfurter, we fall back:
- *   AED, SAR, QAR -> pegged to USD (fixed rates)
- *   BHD, OMR, KWD -> use last-known stored rate if available, otherwise show an alert
+ * Gold (USD/oz): metalpriceapi.com latest (USDXAU)
+ * FX (USD->target + timeseries): exchangerate.host (no key)
+ * Chart: last 30 days gold stored locally (1 point/day) and converted using FX timeseries.
  *
- * Chart: requires Chart.js loaded in index.html
+ * "Live": auto-refresh every 60s (adjust or disable below).
  */
 
 const METALPRICE_API_KEY = "c04d99f9ac2f233a87135f316bbc2d90";
 const TROY_OUNCE_GRAMS = 31.1034768;
-
-// Hard USD pegs (approx fixed pegs)
-const USD_PEGS = {
-  AED: 3.6725,
-  SAR: 3.75,
-  QAR: 3.64
-};
 
 const GCC = [
   { code: "AED", name: "UAE Dirham", flag: "🇦🇪" },
@@ -39,9 +30,6 @@ const state = {
   // gold daily points stored in USD/gram (24K): [{date, usdPerGram24}]
   goldUsdHistory: JSON.parse(localStorage.getItem("goldUsdHistory") || "[]"),
 
-  // store last known USD->currency rates (for missing FX currencies)
-  lastKnownUsdRates: JSON.parse(localStorage.getItem("lastKnownUsdRates") || "{}"),
-
   lastUpdated: localStorage.getItem("lastUpdated") || ""
 };
 
@@ -53,7 +41,6 @@ function persist() {
   localStorage.setItem("karat", String(state.karat));
   localStorage.setItem("price24PerGram", String(state.price24PerGram || 0));
   localStorage.setItem("goldUsdHistory", JSON.stringify(state.goldUsdHistory || []));
-  localStorage.setItem("lastKnownUsdRates", JSON.stringify(state.lastKnownUsdRates || {}));
   localStorage.setItem("lastUpdated", state.lastUpdated || "");
 }
 
@@ -110,11 +97,7 @@ function setActiveKaratButtons() {
 }
 
 function showView(which) {
-  const views = {
-    home: $("viewHome"),
-    calc: $("viewCalc"),
-    currency: $("viewCurrency")
-  };
+  const views = { home: $("viewHome"), calc: $("viewCalc"), currency: $("viewCurrency") };
   Object.values(views).forEach(v => v?.classList.remove("view-active"));
   views[which]?.classList.add("view-active");
 }
@@ -166,7 +149,6 @@ function renderCurrencyList() {
       persist();
       applyUI();
       await refreshAll();
-      // make sure tab and view go back to home
       document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
       document.querySelector('.tab[data-tab="home"]')?.classList.add("active");
       showView("home");
@@ -175,30 +157,27 @@ function renderCurrencyList() {
   });
 }
 
-/* ---- FX: Frankfurter ----
-   We fetch EUR->USD and EUR->TARGET and compute USD->TARGET.
-   If TARGET missing, we use pegs or last known.
-*/
-async function fetchFrankfurterSeries({ start, end }, symbolsCsv) {
-  const url = `https://api.frankfurter.app/${start}..${end}?from=EUR&to=${encodeURIComponent(symbolsCsv)}`;
+/* ---- FX: exchangerate.host ----
+ * latest: /latest?base=USD&symbols=AED,...
+ * timeseries: /timeseries?base=USD&symbols=AED,...&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+ */
+async function fetchFxLatestUsdTo(symbolsCsv) {
+  const url = `https://api.exchangerate.host/latest?base=USD&symbols=${encodeURIComponent(symbolsCsv)}`;
   const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`FX error ${res.status}`);
-  return res.json();
+  if (!res.ok) throw new Error(`FX latest error ${res.status}`);
+  return res.json(); // { rates: { AED: ... } }
 }
 
-function fxUsdToTargetFromEurRates(dayRates, target) {
-  if (target === "USD") return 1;
-  if (USD_PEGS[target]) return USD_PEGS[target];
-
-  const eurToUsd = dayRates?.USD;
-  const eurToT = dayRates?.[target];
-  if (Number.isFinite(eurToUsd) && Number.isFinite(eurToT)) return eurToT / eurToUsd;
-
-  // fallback: last known if we have it
-  const lk = state.lastKnownUsdRates?.[target];
-  if (Number.isFinite(lk) && lk > 0) return lk;
-
-  return null;
+async function fetchFxTimeseriesUsdTo({ start, end }, symbolsCsv) {
+  const url =
+    `https://api.exchangerate.host/timeseries` +
+    `?base=USD` +
+    `&symbols=${encodeURIComponent(symbolsCsv)}` +
+    `&start_date=${encodeURIComponent(start)}` +
+    `&end_date=${encodeURIComponent(end)}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(`FX timeseries error ${res.status}`);
+  return res.json(); // { rates: { YYYY-MM-DD: { AED: ... } } }
 }
 
 /* ---- Gold: MetalpriceAPI ----
@@ -227,7 +206,6 @@ function renderChart(historyConverted) {
   const canvas = $("priceChart");
   if (!canvas) return;
 
-  // If Chart.js missing, don't silently do nothing — show a warning once
   if (typeof Chart === "undefined") {
     console.warn("Chart.js is not loaded; chart will not render.");
     return;
@@ -280,7 +258,7 @@ async function refreshAll() {
   try {
     if (btn) btn.textContent = "Refreshing...";
 
-    // 1) gold current USD/oz -> USD/g
+    // 1) Gold current USD/oz -> USD/g
     const usdPerOunce = await fetchGoldUsdPerOunce();
     const usdPerGram24 = usdPerOunce / TROY_OUNCE_GRAMS;
 
@@ -288,50 +266,36 @@ async function refreshAll() {
     const today = yyyyMmDd(new Date());
     upsertGoldUsdPoint(today, usdPerGram24);
 
-    // 2) FX series for chart conversion + current conversion
-    const { start, end } = lastNDaysRange(30);
+    // 2) FX latest for current conversion
+    const symbols = GCC.map(x => x.code).join(",");
+    const fxLatest = await fetchFxLatestUsdTo(symbols);
 
-    // Try to get USD + all GCC. If some are missing, Frankfurter will simply not include them.
-    const symbols = ["USD", ...GCC.map(x => x.code)].join(",");
-    const fx = await fetchFrankfurterSeries({ start, end }, symbols);
-
-    const fxDates = Object.keys(fx.rates || {}).sort();
-    const latestFxDate = fxDates[fxDates.length - 1];
-    const latestDayRates = fx.rates?.[latestFxDate];
-
-    const usdToTargetNow = fxUsdToTargetFromEurRates(latestDayRates, state.currency);
-
-    if (!Number.isFinite(usdToTargetNow)) {
-      // Could not compute currency conversion
-      state.price24PerGram = usdPerGram24; // fallback USD
-      state.lastUpdated = `FX missing for ${state.currency} (showing USD). ${new Date().toLocaleString()}`;
-      alert(`FX rate not available for ${state.currency} from Frankfurter/ECB.\n` +
-            `Try AED/SAR/QAR (USD-pegged), or keep USD.\n` +
-            `BHD/OMR/KWD may require a different FX provider.`);
-    } else {
-      // cache last known
-      if (state.currency !== "USD" && !USD_PEGS[state.currency]) {
-        state.lastKnownUsdRates[state.currency] = usdToTargetNow;
-      }
-      state.price24PerGram = usdPerGram24 * usdToTargetNow;
-      state.lastUpdated = new Date().toLocaleString();
+    const usdToTargetNow = state.currency === "USD" ? 1 : fxLatest?.rates?.[state.currency];
+    if (!Number.isFinite(usdToTargetNow) || usdToTargetNow <= 0) {
+      throw new Error(`FX rate missing for ${state.currency}`);
     }
 
-    // 3) chart conversion (use same-day FX; if missing, skip that point)
+    state.price24PerGram = usdPerGram24 * usdToTargetNow;
+
+    // 3) FX timeseries for chart conversion
+    const { start, end } = lastNDaysRange(30);
+    const fxTs = await fetchFxTimeseriesUsdTo({ start, end }, symbols);
+
     const factor = karatFactor(state.karat);
     const history = (state.goldUsdHistory || []).slice(-30);
 
     const converted = history
       .map(p => {
-        const dayRates = fx.rates?.[p.date];
-        const rate = fxUsdToTargetFromEurRates(dayRates, state.currency);
-        if (!Number.isFinite(rate)) return null;
+        const day = fxTs?.rates?.[p.date];
+        const rate = state.currency === "USD" ? 1 : day?.[state.currency];
+        if (!Number.isFinite(rate) || rate <= 0) return null;
         return { label: p.date.slice(5), value: p.usdPerGram24 * rate * factor };
       })
       .filter(Boolean);
 
     renderChart(converted);
 
+    state.lastUpdated = new Date().toLocaleString();
     persist();
     applyUI();
   } catch (e) {
@@ -352,17 +316,16 @@ function bindEvents() {
     });
   });
 
-  // Currency view shortcut button
+  // Currency shortcut
   $("btnCurrency")?.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
     document.querySelector('.tab[data-tab="currency"]')?.classList.add("active");
     showView("currency");
   });
 
-  // Refresh
   $("btnRefresh")?.addEventListener("click", refreshAll);
 
-  // Karat buttons
+  // Karat
   document.querySelectorAll(".karat-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const k = Number(btn.dataset.karat);
@@ -386,6 +349,6 @@ function bindEvents() {
   applyUI();
   refreshAll();
 
-  // Optional: "live-ish" refresh every 60s (comment out if you want manual only)
+  // "Live-ish" update every 60s. Increase interval if you want fewer API calls.
   setInterval(() => refreshAll().catch(() => {}), 60_000);
 })();
