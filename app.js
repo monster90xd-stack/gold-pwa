@@ -231,7 +231,6 @@ function renderChart() {
   const ctx = canvas.getContext("2d");
   const factor = karatFactor(state.karat);
 
-  // Build a fixed 10-minute timeline from 1st of month to now
   const now = Date.now();
   const d = new Date();
   const monthStart = new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0).getTime();
@@ -240,42 +239,40 @@ function renderChart() {
   const startBucket = Math.floor(monthStart / BUCKET_MS) * BUCKET_MS;
   const endBucket = Math.floor(now / BUCKET_MS) * BUCKET_MS;
 
+  // Timeline: every 10 minutes from 1st to now
   const timeline = [];
   for (let t = startBucket; t <= endBucket; t += BUCKET_MS) timeline.push(t);
 
-  // Map stored points to their 10-min bucket (Worker should already bucket, but we normalize anyway)
+  // Build bucket->rates map from server points
   const points = Array.isArray(state.monthPoints) ? state.monthPoints : [];
   const bucketToRates = new Map();
   for (const p of points) {
     const bt = Math.floor(p.t / BUCKET_MS) * BUCKET_MS;
-    // keep latest point in that bucket (if duplicates ever happen)
     bucketToRates.set(bt, p.rates);
   }
 
   function usdToCurFromRates(rates, cur) {
     if (cur === "USD") return 1;
 
-    // preferred: CUR per USD (e.g. AED)
-    const direct = rates?.[cur];
+    const direct = rates?.[cur]; // CUR per USD
     if (Number.isFinite(direct) && direct > 0) return direct;
 
-    // fallback: USD<cur> is USD per CUR (invert)
-    const inv = rates?.[`USD${cur}`];
+    const inv = rates?.[`USD${cur}`]; // USD per CUR
     if (Number.isFinite(inv) && inv > 0) return 1 / inv;
 
     return NaN;
   }
 
-  // Labels: show date on day boundaries, otherwise HH:MM (sparser display via autoskip)
+  // X-axis labels: DAYS ONLY.
+  // We keep one label per bucket internally, but return empty string for non-midnight points,
+  // so the axis shows only day markers.
   const labels = timeline.map((t) => {
     const dt = new Date(t);
-    if (dt.getHours() === 0 && dt.getMinutes() === 0) {
-      return dt.toLocaleDateString([], { month: "short", day: "2-digit" });
-    }
-    return dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const isMidnight = dt.getHours() === 0 && dt.getMinutes() === 0;
+    return isMidnight ? dt.toLocaleDateString([], { month: "short", day: "2-digit" }) : "";
   });
 
-  // Data: for each bucket in the timeline, either compute value or leave gap (null)
+  // Data points (null for missing buckets -> gaps)
   const data = timeline.map((t) => {
     const rates = bucketToRates.get(t);
     if (!rates) return null;
@@ -288,14 +285,14 @@ function renderChart() {
 
     const usdPerGram24 = usdXau / TROY_OUNCE_GRAMS;
     const curPerGram24 = usdPerGram24 * usdToCur;
-
     return curPerGram24 * factor;
   });
 
-  // Make single-point periods visible (early month / just launched)
   const knownCount = data.reduce((n, v) => (v == null ? n : n + 1), 0);
   const fewKnown = knownCount <= 2;
 
+  // Mobile friendly: larger touch area, less dense ticks, no points (except when few points),
+  // and allow "nearest" interaction.
   const config = {
     type: "line",
     data: {
@@ -304,40 +301,79 @@ function renderChart() {
         label: `${state.karat}K (${state.currency})`,
         data,
         borderColor: "rgba(110,231,255,0.95)",
-        backgroundColor: "rgba(110,231,255,0.12)",
+        backgroundColor: "rgba(110,231,255,0.14)",
         tension: 0.25,
         fill: true,
-        pointRadius: fewKnown ? 3 : 0,
+        borderWidth: 2.5,
+        pointRadius: fewKnown ? 4 : 0,
+        pointHitRadius: 18,     // easier touch
         pointHoverRadius: 6,
-        spanGaps: false // show gaps until we have data for those buckets
+        spanGaps: false
       }]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      animation: false, // smoother on low-end phones
+      interaction: {
+        mode: "nearest",
+        intersect: false
+      },
       plugins: {
-        legend: { labels: { color: "#e8eefc" } },
-        tooltip: { callbacks: { label: (c) => fmtMoney(c.parsed.y, state.currency) } }
+        legend: {
+          display: true,
+          labels: { color: "#e8eefc", boxWidth: 10, boxHeight: 10 }
+        },
+        tooltip: {
+          displayColors: false,
+          callbacks: {
+            // Tooltip title: show full date + time for the hovered bucket
+            title: (items) => {
+              if (!items?.length) return "";
+              const idx = items[0].dataIndex;
+              const t = timeline[idx];
+              return new Date(t).toLocaleString([], {
+                month: "short",
+                day: "2-digit",
+                hour: "2-digit",
+                minute: "2-digit"
+              });
+            },
+            // Tooltip label: show price only (already includes currency)
+            label: (ctx) => fmtMoney(ctx.parsed.y, state.currency)
+          }
+        }
       },
       scales: {
         x: {
-          ticks: { color: "#9bb0d4", autoSkip: true, maxRotation: 0 },
-          grid: { color: "rgba(255,255,255,0.06)" }
+          ticks: {
+            color: "#9bb0d4",
+            autoSkip: false, // we already blank most labels; keep day labels
+            maxRotation: 0,
+            padding: 8,
+            font: { size: 12, weight: "700" }
+          },
+          grid: { display: false }
         },
         y: {
-          ticks: { color: "#9bb0d4" },
+          ticks: {
+            color: "#9bb0d4",
+            padding: 8,
+            font: { size: 12, weight: "700" }
+          },
           grid: { color: "rgba(255,255,255,0.06)" }
         }
       }
     }
   };
 
-  if (!chart) chart = new Chart(ctx, config);
-  else {
+  if (!chart) {
+    chart = new Chart(ctx, config);
+  } else {
     chart.data.labels = labels;
     chart.data.datasets[0].data = data;
     chart.data.datasets[0].label = `${state.karat}K (${state.currency})`;
-    chart.data.datasets[0].pointRadius = fewKnown ? 3 : 0;
+    chart.data.datasets[0].pointRadius = fewKnown ? 4 : 0;
     chart.update();
   }
 }
