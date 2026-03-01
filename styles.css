@@ -184,3 +184,87 @@ body{
   padding: 14px;
   text-align:center;
 }
+/* --- Buttons --- */
+.btn {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  border-radius: 12px;
+  padding: 10px 14px;
+  transition: transform 0.05s ease, background-color 0.2s ease, opacity 0.2s ease;
+}
+.btn:active { transform: scale(0.98); }
+.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.btn-primary {
+  background: #20d3ff;
+  color: #06101a;
+  font-weight: 700;
+}
+
+.btn-link {
+  background: transparent;
+  color: #7dd3fc;
+  padding: 0;
+  border-radius: 0;
+  text-decoration: underline;
+}
+
+/* --- Tabs --- */
+.tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  margin: 12px 0;
+}
+.tab {
+  background: rgba(255,255,255,0.06);
+  color: #dbeafe;
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 14px;
+  padding: 12px 10px;
+  font-weight: 700;
+}
+.tab.active {
+  background: rgba(32, 211, 255, 0.18);
+  border-color: rgba(32, 211, 255, 0.45);
+}
+
+/* --- Karat buttons --- */
+.karats { display: flex; gap: 10px; margin-top: 12px; }
+.karat-btn {
+  flex: 1;
+  background: rgba(255,255,255,0.06);
+  color: #e5e7eb;
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 14px;
+  padding: 10px 8px;
+  font-weight: 700;
+}
+.karat-btn.active {
+  background: rgba(250, 204, 21, 0.18);
+  border-color: rgba(250, 204, 21, 0.55);
+  color: #fde68a;
+}
+
+/* --- Currency list --- */
+.currency-list { display: flex; flex-direction: column; gap: 10px; }
+.currency-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 32px 60px 1fr 24px;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255,255,255,0.06);
+  color: #e5e7eb;
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 14px;
+  padding: 12px 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.currency-item:hover { background: rgba(255,255,255,0.09); }
+.currency-flag { font-size: 18px; }
+.currency-code { font-weight: 800; letter-spacing: 0.5px; }
+.currency-name { opacity: 0.85; font-size: 13px; }
+.currency-check { text-align: right; font-weight: 900; color: #34d399; }
