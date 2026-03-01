@@ -1,15 +1,30 @@
-// UPDATED app.js
-// Changes requested:
-// 1) Graph time labels now update only when the 10-min refresh runs (not on tab/page clicks).
-//    - We freeze the x-axis labels per refresh in `state.chart`.
-// 2) Add label: "Latest update: <time> | Next update: <time>" (English/Arabic).
+// GCC Gold - TRUE month-to-date chart (server history via Cloudflare Worker KV)
 //
-// Requires index.html change: add <span id="nextUpdateLabel"></span> inside lblUpdatedWrap.
-// (Provided in index.html block below.)
+// Requires your Worker endpoints:
+//   - https://gcc-gold-cache.monster-90xd.workers.dev/latest
+//   - https://gcc-gold-cache.monster-90xd.workers.dev/history/month
+//
+// UI assumptions (ids exist in your index.html):
+// btnLang, tabHome, tabCalc, tabCurrency
+// viewHome, viewCalc, viewCurrency
+// lblCurrentPrice, pricePerGramLabel, lblCurrency, currencyLabel, btnCurrency
+// karatLabel, calcKaratLabel, calcPricePerGramLabel
+// gramsInput, totalLabel
+// lblUpdatedWrap (we replace innerHTML), lblChartTitle, lblKarat
+// lblPricePerGramCalc, lblGrams, lblTotal, btnBackHome1, btnBackHome2, lblChooseCurrency
+// currencyList, priceChart
+// adTitle (optional)
+//
+// Notes:
+// - "True month" means: month points come from your Worker KV, not device local storage.
+// - Graph updates on the 10-minute refresh schedule (and on currency/karat change for values).
+// - Label shows: Latest update time + Next update time.
 
-const METALPRICE_PROXY_URL = "https://gcc-gold-cache.monster-90xd.workers.dev/latest";
+const WORKER_BASE_URL = "https://gcc-gold-cache.monster-90xd.workers.dev";
+const LATEST_URL = `${WORKER_BASE_URL}/latest`;
+const MONTH_HISTORY_URL = `${WORKER_BASE_URL}/history/month`;
 
-const AUTO_REFRESH_MS = 10 * 60 * 1000; // 10 minutes
+const AUTO_REFRESH_MS = 10 * 60 * 1000; // 10 minutes (matches your Basic plan delay + worker TTL)
 const TROY_OUNCE_GRAMS = 31.1034768;
 
 const GCC = [
@@ -33,24 +48,18 @@ const state = {
   karat: Number(localStorage.getItem("karat") || DEFAULTS.karat),
   lang: localStorage.getItem("lang") || DEFAULTS.lang,
 
+  // latest FX (CUR per USD) from /latest, used for the big price tiles
   usdToCurrency: Number(localStorage.getItem("usdToCurrency") || 1),
 
+  // derived: 24k price per gram in selected currency (current)
   price24PerGram: 0,
 
-  // timestamps
+  // when we last refreshed (app time)
   lastUpdatedAt: Number(localStorage.getItem("lastUpdatedAt") || 0),
 
-  // label strings (for display; recomputed)
-  lastUpdated: localStorage.getItem("lastUpdated") || "",
-
-  // [{ t, usdPerGram24 }]
-  history: JSON.parse(localStorage.getItem("history") || "[]"),
-
-  // Freeze chart labels/data based on last refresh, so tab clicks don't regenerate time labels.
-  chart: {
-    labels: JSON.parse(localStorage.getItem("chart.labels") || "[]"), // string[]
-    pointsT: JSON.parse(localStorage.getItem("chart.pointsT") || "[]") // number[] epoch ms
-  }
+  // true month points from server
+  // each point: { t: number, rates: { USDXAU, AED, SAR, ... } }
+  monthPoints: []
 };
 
 const $ = (id) => document.getElementById(id);
@@ -61,30 +70,21 @@ function persist() {
   localStorage.setItem("currency", state.currency);
   localStorage.setItem("karat", String(state.karat));
   localStorage.setItem("lang", state.lang);
-
   localStorage.setItem("usdToCurrency", String(state.usdToCurrency || 1));
-
   localStorage.setItem("lastUpdatedAt", String(state.lastUpdatedAt || 0));
-  localStorage.setItem("lastUpdated", state.lastUpdated || "");
-
-  localStorage.setItem("history", JSON.stringify(state.history || []));
-
-  localStorage.setItem("chart.labels", JSON.stringify(state.chart.labels || []));
-  localStorage.setItem("chart.pointsT", JSON.stringify(state.chart.pointsT || []));
 }
 
 function fmtMoney(value, currency) {
   if (!Number.isFinite(value)) return "—";
   try {
-    return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 2 }).format(value);
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 2
+    }).format(value);
   } catch {
     return `${value.toFixed(2)} ${currency}`;
   }
-}
-
-function fmtTime(ts) {
-  if (!ts) return "—";
-  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function fmtDateTime(ts) {
@@ -93,26 +93,28 @@ function fmtDateTime(ts) {
 }
 
 function nextUpdateAt() {
-  if (!state.lastUpdatedAt) return 0;
-  return state.lastUpdatedAt + AUTO_REFRESH_MS;
+  return state.lastUpdatedAt ? (state.lastUpdatedAt + AUTO_REFRESH_MS) : 0;
 }
 
 function karatFactor(k) { return k / 24; }
-
-function setActiveKaratButtons() {
-  document.querySelectorAll(".karat-btn").forEach((btn) => {
-    btn.classList.toggle("active", Number(btn.dataset.karat) === state.karat);
-  });
-  $("karatLabel") && ($("karatLabel").textContent = String(state.karat));
-  $("calcKaratLabel") && ($("calcKaratLabel").textContent = String(state.karat));
-}
 
 function showView(tab) {
   const map = { home: "viewHome", calc: "viewCalc", currency: "viewCurrency" };
   Object.values(map).forEach((id) => $(id)?.classList.remove("view-active"));
   $(map[tab])?.classList.add("view-active");
 
-  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  document.querySelectorAll(".tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === tab);
+  });
+}
+
+function setActiveKaratButtons() {
+  document.querySelectorAll(".karat-btn").forEach((btn) => {
+    btn.classList.toggle("active", Number(btn.dataset.karat) === state.karat);
+  });
+
+  $("karatLabel") && ($("karatLabel").textContent = String(state.karat));
+  $("calcKaratLabel") && ($("calcKaratLabel").textContent = String(state.karat));
 }
 
 function updateTotal() {
@@ -129,12 +131,49 @@ function updateTotal() {
   out.textContent = fmtMoney(grams * perGram, state.currency);
 }
 
+function applyTranslations() {
+  const isAr = state.lang === "ar";
+
+  document.documentElement.lang = isAr ? "ar" : "en";
+  document.documentElement.dir = isAr ? "rtl" : "ltr";
+
+  $("btnLang") && ($("btnLang").textContent = isAr ? "English" : "العربية");
+
+  $("tabHome") && ($("tabHome").textContent = isAr ? "الرئيسية" : "Home");
+  $("tabCalc") && ($("tabCalc").textContent = isAr ? "الحاسبة" : "Calculator");
+  $("tabCurrency") && ($("tabCurrency").textContent = isAr ? "العملة" : "Currency");
+
+  $("lblCurrentPrice") && ($("lblCurrentPrice").textContent = isAr ? "السعر الحالي / جرام" : "Current price / gram");
+  $("lblCurrency") && ($("lblCurrency").textContent = isAr ? "العملة" : "Currency");
+  $("btnCurrency") && ($("btnCurrency").textContent = isAr ? "تغيير" : "Change");
+
+  const latest = fmtDateTime(state.lastUpdatedAt);
+  const next = fmtDateTime(nextUpdateAt());
+  if ($("lblUpdatedWrap")) {
+    $("lblUpdatedWrap").innerHTML = isAr
+      ? `آخر تحديث: <span id="updatedLabel">${latest}</span> | التحديث القادم: <span id="nextUpdateLabel">${next}</span>`
+      : `Latest update: <span id="updatedLabel">${latest}</span> | Next update: <span id="nextUpdateLabel">${next}</span>`;
+  }
+
+  $("lblChartTitle") && ($("lblChartTitle").textContent = isAr ? "من بداية الشهر حتى الآن" : "Current month to latest update");
+  $("lblKarat") && ($("lblKarat").textContent = isAr ? "العيار" : "Karat");
+
+  $("lblPricePerGramCalc") && ($("lblPricePerGramCalc").textContent = isAr ? "السعر / جرام" : "Price / gram");
+  $("lblGrams") && ($("lblGrams").textContent = isAr ? "الوزن (جرام)" : "Grams");
+  $("lblTotal") && ($("lblTotal").textContent = isAr ? "الإجمالي" : "Total");
+  $("btnBackHome1") && ($("btnBackHome1").textContent = isAr ? "رجوع" : "Back");
+  $("btnBackHome2") && ($("btnBackHome2").textContent = isAr ? "رجوع" : "Back");
+  $("lblChooseCurrency") && ($("lblChooseCurrency").textContent = isAr ? "اختر العملة" : "Choose currency");
+
+  $("adTitle") && ($("adTitle").textContent = isAr ? "إعلان" : "Ad");
+}
+
 function renderCurrencyList() {
   const list = $("currencyList");
   if (!list) return;
-  list.innerHTML = "";
 
   const isAr = state.lang === "ar";
+  list.innerHTML = "";
 
   for (const c of CURRENCIES) {
     const div = document.createElement("div");
@@ -149,45 +188,40 @@ function renderCurrencyList() {
       </div>
       <div class="check">${c.code === state.currency ? "✓" : ""}</div>
     `;
+
     div.addEventListener("click", async () => {
       state.currency = c.code;
       persist();
 
-      // Update chart values instantly (x-axis labels remain frozen)
+      // Update chart values immediately (it will re-convert each stored point to new currency)
       applyUI();
 
-      // Then refresh to get accurate FX for that currency (worker cached anyway)
+      // Fetch latest + month points again (worker cached; cheap)
       await refreshNow();
       showView("home");
     });
+
     list.appendChild(div);
   }
 }
 
 async function fetchLatestRates() {
-  const res = await fetch(METALPRICE_PROXY_URL, { cache: "no-store" });
+  const res = await fetch(LATEST_URL, { cache: "no-store" });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Proxy error ${res.status}: ${text}`);
+    throw new Error(`Latest error ${res.status}: ${text}`);
   }
   return res.json();
 }
 
-function pushHistoryPointUsd(usdPerGram24) {
-  const now = Date.now();
-  state.history = Array.isArray(state.history) ? state.history : [];
-  state.history.push({ t: now, usdPerGram24 });
-  state.history = state.history.slice(-720);
-}
-
-// Freeze chart labels to refresh cadence, not UI events.
-function rebuildFrozenChartWindow() {
-  const points = (state.history || []).slice(-144);
-  const labels = points.map(p => fmtTime(p.t)); // HH:MM
-  const pointsT = points.map(p => p.t);
-
-  state.chart.labels = labels;
-  state.chart.pointsT = pointsT;
+async function fetchMonthHistory() {
+  const res = await fetch(MONTH_HISTORY_URL, { cache: "no-store" });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`History error ${res.status}: ${text}`);
+  }
+  const json = await res.json();
+  return Array.isArray(json?.points) ? json.points : [];
 }
 
 function renderChart() {
@@ -197,15 +231,34 @@ function renderChart() {
   const ctx = canvas.getContext("2d");
   const factor = karatFactor(state.karat);
 
-  // Use frozen chart timestamps from last refresh
-  const pointsT = (state.chart.pointsT || []).slice(-144);
-  const labels = (state.chart.labels || []).slice(-144);
+  // Make chart lighter on mobile: if too many points, sample
+  const raw = Array.isArray(state.monthPoints) ? state.monthPoints : [];
+  const MAX_POINTS = 500;
+  let points = raw;
+  if (raw.length > MAX_POINTS) {
+    const step = Math.ceil(raw.length / MAX_POINTS);
+    points = raw.filter((_, idx) => idx % step === 0);
+  }
 
-  // Map timestamps to history points
-  const map = new Map((state.history || []).map(p => [p.t, p.usdPerGram24]));
-  const data = pointsT.map(t => {
-    const usdPerGram24 = map.get(t);
-    return Number.isFinite(usdPerGram24) ? (usdPerGram24 * state.usdToCurrency * factor) : null;
+  const labels = points.map((p) => {
+    const d = new Date(p.t);
+    // show "Mar 01" at midnight, else "HH:MM"
+    const hh = d.getHours();
+    const mm = d.getMinutes();
+    if (hh === 0 && mm === 0) return d.toLocaleDateString([], { month: "short", day: "2-digit" });
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  });
+
+  const data = points.map((p) => {
+    const usdXau = p?.rates?.USDXAU;
+    if (!Number.isFinite(usdXau) || usdXau <= 0) return null;
+
+    const usdToCur = state.currency === "USD" ? 1 : p?.rates?.[state.currency];
+    if (!Number.isFinite(usdToCur) || usdToCur <= 0) return null;
+
+    const usdPerGram24 = usdXau / TROY_OUNCE_GRAMS;
+    const curPerGram24 = usdPerGram24 * usdToCur;
+    return curPerGram24 * factor;
   });
 
   const config = {
@@ -231,7 +284,7 @@ function renderChart() {
         tooltip: { callbacks: { label: (c) => fmtMoney(c.parsed.y, state.currency) } }
       },
       scales: {
-        x: { ticks: { color: "#9bb0d4" }, grid: { color: "rgba(255,255,255,0.06)" } },
+        x: { ticks: { color: "#9bb0d4", autoSkip: true, maxRotation: 0 }, grid: { color: "rgba(255,255,255,0.06)" } },
         y: { ticks: { color: "#9bb0d4" }, grid: { color: "rgba(255,255,255,0.06)" } }
       }
     }
@@ -246,69 +299,29 @@ function renderChart() {
   }
 }
 
-function applyTranslations() {
-  const isAr = state.lang === "ar";
-
-  document.documentElement.lang = isAr ? "ar" : "en";
-  document.documentElement.dir = isAr ? "rtl" : "ltr";
-
-  $("btnLang").textContent = isAr ? "English" : "العربية";
-
-  $("tabHome").textContent = isAr ? "الرئيسية" : "Home";
-  $("tabCalc").textContent = isAr ? "الحاسبة" : "Calculator";
-  $("tabCurrency").textContent = isAr ? "العملة" : "Currency";
-
-  $("lblCurrentPrice").textContent = isAr ? "السعر الحالي / جرام" : "Current price / gram";
-  $("lblCurrency").textContent = isAr ? "العملة" : "Currency";
-  $("btnCurrency").textContent = isAr ? "تغيير" : "Change";
-
-  // Latest + Next update line
-  const latest = fmtDateTime(state.lastUpdatedAt);
-  const next = fmtDateTime(nextUpdateAt());
-
-  $("lblUpdatedWrap").innerHTML = isAr
-    ? `آخر تحديث: <span id="updatedLabel">${latest}</span> | التحديث القادم: <span id="nextUpdateLabel">${next}</span>`
-    : `Latest update: <span id="updatedLabel">${latest}</span> | Next update: <span id="nextUpdateLabel">${next}</span>`;
-
-  $("lblChartTitle").textContent = isAr ? "البيانات حسب آخر تحديث (كل 10 دقائق)" : "Data updated every 10 minutes";
-  $("lblKarat").textContent = isAr ? "العيار" : "Karat";
-
-  $("lblPricePerGramCalc").textContent = isAr ? "السعر / جرام" : "Price / gram";
-  $("lblGrams").textContent = isAr ? "الوزن (جرام)" : "Grams";
-  $("lblTotal").textContent = isAr ? "الإجمالي" : "Total";
-  $("btnBackHome1").textContent = isAr ? "رجوع" : "Back";
-  $("lblChooseCurrency").textContent = isAr ? "اختر العملة" : "Choose currency";
-  $("btnBackHome2").textContent = isAr ? "رجوع" : "Back";
-
-  const adTitle = $("adTitle");
-  if (adTitle) adTitle.textContent = isAr ? "إعلان" : "Ad";
-}
-
 function applyUI() {
-  $("currencyLabel").textContent = state.currency;
+  $("currencyLabel") && ($("currencyLabel").textContent = state.currency);
 
   const perGramSelectedK = state.price24PerGram * karatFactor(state.karat);
-  $("pricePerGramLabel").textContent = fmtMoney(perGramSelectedK, state.currency);
-  $("calcPricePerGramLabel").textContent = fmtMoney(perGramSelectedK, state.currency);
+  $("pricePerGramLabel") && ($("pricePerGramLabel").textContent = fmtMoney(perGramSelectedK, state.currency));
+  $("calcPricePerGramLabel") && ($("calcPricePerGramLabel").textContent = fmtMoney(perGramSelectedK, state.currency));
 
   setActiveKaratButtons();
   updateTotal();
   renderCurrencyList();
-
-  // IMPORTANT: renderChart uses frozen labels; it won't change labels on tab clicks.
   renderChart();
-
   applyTranslations();
 }
 
 async function refreshNow() {
   try {
-    const json = await fetchLatestRates();
+    // 1) Latest (tile values + update times)
+    const latest = await fetchLatestRates();
 
-    const usdXau = json?.rates?.USDXAU;
+    const usdXau = latest?.rates?.USDXAU;
     if (!Number.isFinite(usdXau) || usdXau <= 0) throw new Error("Missing USDXAU rate");
 
-    const usdToCur = state.currency === "USD" ? 1 : json?.rates?.[state.currency];
+    const usdToCur = state.currency === "USD" ? 1 : latest?.rates?.[state.currency];
     if (!Number.isFinite(usdToCur) || usdToCur <= 0) throw new Error(`Missing ${state.currency} rate`);
 
     state.usdToCurrency = usdToCur;
@@ -317,14 +330,11 @@ async function refreshNow() {
     state.price24PerGram = usdPerGram24 * usdToCur;
 
     state.lastUpdatedAt = Date.now();
-    state.lastUpdated = fmtDateTime(state.lastUpdatedAt);
-
-    pushHistoryPointUsd(usdPerGram24);
-
-    // Freeze chart labels to this refresh
-    rebuildFrozenChartWindow();
-
     persist();
+
+    // 2) True month points (server)
+    state.monthPoints = await fetchMonthHistory();
+
     applyUI();
   } catch (e) {
     console.error(e);
@@ -335,6 +345,7 @@ async function refreshNow() {
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
 
+  // When app becomes visible again, do a refresh
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") refreshNow();
   });
@@ -343,39 +354,43 @@ function startAutoRefresh() {
 }
 
 function initEvents() {
-  document.querySelectorAll(".tab").forEach((btn) => btn.addEventListener("click", () => showView(btn.dataset.tab)));
+  // Tabs
+  document.querySelectorAll(".tab").forEach((btn) => {
+    btn.addEventListener("click", () => showView(btn.dataset.tab));
+  });
 
+  // Currency view
   $("btnCurrency")?.addEventListener("click", () => showView("currency"));
   $("btnBackHome1")?.addEventListener("click", () => showView("home"));
   $("btnBackHome2")?.addEventListener("click", () => showView("home"));
 
+  // Language
   $("btnLang")?.addEventListener("click", () => {
     state.lang = state.lang === "ar" ? "en" : "ar";
     persist();
     applyUI();
   });
 
+  // Karat buttons
   document.querySelectorAll(".karat-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.karat = Number(btn.dataset.karat);
       persist();
-      applyUI(); // chart values update; labels remain frozen
+      applyUI(); // chart re-converts immediately
     });
   });
 
+  // Calculator grams input
   $("gramsInput")?.addEventListener("input", updateTotal);
 }
 
 (function init() {
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(console.warn);
-
-  // Ensure chart freeze arrays are consistent on first load
-  if (!Array.isArray(state.chart.labels) || !Array.isArray(state.chart.pointsT) || state.chart.pointsT.length === 0) {
-    rebuildFrozenChartWindow();
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js").catch(console.warn);
   }
 
   initEvents();
-  applyUI();
+  applyUI();   // initial render (blank chart until loaded)
   refreshNow();
   startAutoRefresh();
 })();
