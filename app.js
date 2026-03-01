@@ -1,14 +1,18 @@
 /* GCC Gold PWA
- * Gold: MetalpriceAPI (USDXAU)
- * FX:   FloatRates (NO KEY) for latest USD->target
- * Chart: gold stored daily in USD/gram; chart converts using CURRENT fx rate (no historical fx).
+ * Gold: MetalpriceAPI (USDXAU) - fetched ONCE per day (cached)
+ * FX:   FloatRates (USD table) - fetched on refresh (no key)
+ * Chart: uses stored daily gold points in USD and converts using CURRENT fx rate.
+ *
+ * Required elements in index.html:
+ * btnRefresh, btnCurrency, currencyLabel, pricePerGramLabel, updatedLabel
+ * gramsInput, totalLabel, calcPricePerGramLabel, calcCurrencyLabel
+ * viewHome, viewCalc, viewCurrency, currencyList
+ * canvas#priceChart and Chart.js loaded
  */
 
 const METALPRICE_API_KEY = "c04d99f9ac2f233a87135f316bbc2d90";
 const TROY_OUNCE_GRAMS = 31.1034768;
 
-// FloatRates endpoints are per base-currency.
-// We'll use USD table: https://www.floatrates.com/daily/usd.json
 const FLOATRATES_USD = "https://www.floatrates.com/daily/usd.json";
 
 const GCC = [
@@ -29,7 +33,7 @@ const state = {
   // current 24K per gram in selected currency
   price24PerGram: Number(localStorage.getItem("price24PerGram") || 0),
 
-  // gold daily points stored in USD/gram (24K)
+  // gold daily points stored in USD/gram (24K): [{date:"YYYY-MM-DD", usdPerGram24:number}]
   goldUsdHistory: JSON.parse(localStorage.getItem("goldUsdHistory") || "[]"),
 
   lastUpdated: localStorage.getItem("lastUpdated") || ""
@@ -146,7 +150,7 @@ function renderCurrencyList() {
       persist();
       applyUI();
 
-      await refreshAll();
+      await refreshAll({ forceGold: false });
 
       document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
       document.querySelector('.tab[data-tab="home"]')?.classList.add("active");
@@ -156,11 +160,8 @@ function renderCurrencyList() {
   });
 }
 
-/* -------------------- FX: FloatRates (NO KEY) --------------------
- * GET https://www.floatrates.com/daily/usd.json
- * Response keys are lowercase currency codes.
- * Each entry includes "rate" which is: 1 USD = rate * (that currency)
- */
+/* -------------------- FX: FloatRates (NO KEY) -------------------- */
+/* Table: keys are lowercase currency codes; entry.rate means 1 USD = rate * currency */
 async function fetchFxLatestUsdTable() {
   const res = await fetch(FLOATRATES_USD, { cache: "no-store" });
   if (!res.ok) throw new Error(`FX latest HTTP ${res.status}`);
@@ -178,10 +179,10 @@ async function fetchUsdToCurrencyRate(currency) {
   if (!Number.isFinite(rate) || rate <= 0) {
     throw new Error(`FX rate missing for ${currency} from FloatRates`);
   }
-  return rate; // 1 USD -> currency
+  return rate;
 }
 
-/* -------------------- Gold: MetalpriceAPI -------------------- */
+/* -------------------- Gold: MetalpriceAPI (daily cached) -------------------- */
 async function fetchGoldUsdPerOunce() {
   const url =
     "https://api.metalpriceapi.com/v1/latest" +
@@ -200,6 +201,39 @@ async function fetchGoldUsdPerOunce() {
     throw new Error("Missing/invalid USDXAU rate from MetalpriceAPI");
   }
   return usdXau;
+}
+
+function loadGoldCache() {
+  try {
+    return JSON.parse(localStorage.getItem("goldDailyCache") || "null");
+  } catch {
+    return null;
+  }
+}
+
+function saveGoldCache(cache) {
+  localStorage.setItem("goldDailyCache", JSON.stringify(cache));
+}
+
+/** returns { usdPerGram24, dateStr, source } */
+async function getGoldUsdPerGram24Daily({ force = false } = {}) {
+  const today = yyyyMmDd(new Date());
+  const cached = loadGoldCache();
+
+  if (
+    !force &&
+    cached?.dateStr === today &&
+    Number.isFinite(cached?.usdPerGram24) &&
+    cached.usdPerGram24 > 0
+  ) {
+    return { usdPerGram24: cached.usdPerGram24, dateStr: today, source: "cache" };
+  }
+
+  const usdPerOunce = await fetchGoldUsdPerOunce();
+  const usdPerGram24 = usdPerOunce / TROY_OUNCE_GRAMS;
+
+  saveGoldCache({ dateStr: today, usdPerGram24 });
+  return { usdPerGram24, dateStr: today, source: "api" };
 }
 
 /* -------------------- Chart -------------------- */
@@ -254,26 +288,25 @@ function renderChart(historyConverted) {
 }
 
 /* -------------------- Main refresh -------------------- */
-async function refreshAll() {
+async function refreshAll({ forceGold = false } = {}) {
   const btn = $("btnRefresh");
   try {
     if (btn) btn.textContent = "Refreshing...";
 
-    // gold latest USD/oz -> USD/g
-    const usdPerOunce = await fetchGoldUsdPerOunce();
-    const usdPerGram24 = usdPerOunce / TROY_OUNCE_GRAMS;
+    // 1) gold (daily cached)
+    const gold = await getGoldUsdPerGram24Daily({ force: forceGold });
+    const usdPerGram24 = gold.usdPerGram24;
 
-    // store today's USD point
-    const today = yyyyMmDd(new Date());
-    upsertGoldUsdPoint(today, usdPerGram24);
+    // store today's USD point (1 point/day)
+    upsertGoldUsdPoint(gold.dateStr, usdPerGram24);
 
-    // current FX (USD -> selected currency)
+    // 2) FX current
     const usdToTargetNow = await fetchUsdToCurrencyRate(state.currency);
 
-    // current 24K per gram in target currency
+    // 3) UI price
     state.price24PerGram = usdPerGram24 * usdToTargetNow;
 
-    // chart conversion: use current FX for all points (no historical FX)
+    // 4) Chart conversion uses current FX for all points (no historical FX)
     const factor = karatFactor(state.karat);
     const history = (state.goldUsdHistory || []).slice(-30);
     const converted = history.map(p => ({
@@ -283,7 +316,7 @@ async function refreshAll() {
 
     renderChart(converted);
 
-    state.lastUpdated = new Date().toLocaleString();
+    state.lastUpdated = `${new Date().toLocaleString()} (gold: ${gold.source})`;
     persist();
     applyUI();
   } catch (e) {
@@ -310,7 +343,8 @@ function bindEvents() {
     showView("currency");
   });
 
-  $("btnRefresh")?.addEventListener("click", refreshAll);
+  // Manual refresh forces a new daily gold fetch
+  $("btnRefresh")?.addEventListener("click", () => refreshAll({ forceGold: true }));
 
   document.querySelectorAll(".karat-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -319,7 +353,7 @@ function bindEvents() {
       state.karat = k;
       persist();
       applyUI();
-      refreshAll();
+      refreshAll({ forceGold: false });
     });
   });
 
@@ -332,8 +366,8 @@ function bindEvents() {
   }
   bindEvents();
   applyUI();
-  refreshAll();
+  refreshAll({ forceGold: false });
 
-  // Optional auto-refresh every 60 seconds
-  setInterval(() => refreshAll().catch(() => {}), 60_000);
+  // Optional: run once per day (not per second)
+  setInterval(() => refreshAll({ forceGold: false }).catch(() => {}), 24 * 60 * 60 * 1000);
 })();
