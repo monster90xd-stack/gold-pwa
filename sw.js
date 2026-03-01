@@ -1,5 +1,5 @@
 // UPDATED sw.js (cache-bust)
-const CACHE_NAME = "gcc-gold-pwa-v9";
+const CACHE_NAME = "gcc-gold-pwa-v10";
 
 const ASSETS = [
   "./",
