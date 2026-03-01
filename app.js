@@ -1,19 +1,15 @@
 /* GCC Gold PWA
- * Gold: metalpriceapi.com (USDXAU)
- * FX:   exchangerate.host (NO KEY)  ✅
- *
- * IMPORTANT:
- * You were seeing: {"code":101,"type":"missing_access_key"...}
- * That error is from a DIFFERENT FX service (apilayer exchangeratesapi).
- * This file hard-codes exchangerate.host and also logs the FX URLs so you can verify.
- *
- * Chart: requires Chart.js loaded in index.html
+ * Gold: MetalpriceAPI (USDXAU)
+ * FX:   FloatRates (NO KEY) for latest USD->target
+ * Chart: gold stored daily in USD/gram; chart converts using CURRENT fx rate (no historical fx).
  */
 
 const METALPRICE_API_KEY = "c04d99f9ac2f233a87135f316bbc2d90";
 const TROY_OUNCE_GRAMS = 31.1034768;
 
-const FX_BASE = "https://api.exchangerate.host"; // <-- NO KEY
+// FloatRates endpoints are per base-currency.
+// We'll use USD table: https://www.floatrates.com/daily/usd.json
+const FLOATRATES_USD = "https://www.floatrates.com/daily/usd.json";
 
 const GCC = [
   { code: "AED", name: "UAE Dirham", flag: "🇦🇪" },
@@ -33,7 +29,7 @@ const state = {
   // current 24K per gram in selected currency
   price24PerGram: Number(localStorage.getItem("price24PerGram") || 0),
 
-  // gold daily points stored in USD/gram (24K): [{date:"YYYY-MM-DD", usdPerGram24:number}]
+  // gold daily points stored in USD/gram (24K)
   goldUsdHistory: JSON.parse(localStorage.getItem("goldUsdHistory") || "[]"),
 
   lastUpdated: localStorage.getItem("lastUpdated") || ""
@@ -68,13 +64,6 @@ function yyyyMmDd(d) {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
-}
-
-function lastNDaysRange(days) {
-  const end = new Date();
-  const start = new Date();
-  start.setDate(end.getDate() - (days - 1));
-  return { start: yyyyMmDd(start), end: yyyyMmDd(end) };
 }
 
 function karatFactor(k) { return k / 24; }
@@ -167,40 +156,29 @@ function renderCurrencyList() {
   });
 }
 
-/* -------------------- FX: exchangerate.host (NO KEY) -------------------- */
-async function fxFetchJson(url) {
-  // log to help you verify you are NOT hitting any "access_key" API
-  console.log("FX request:", url);
+/* -------------------- FX: FloatRates (NO KEY) --------------------
+ * GET https://www.floatrates.com/daily/usd.json
+ * Response keys are lowercase currency codes.
+ * Each entry includes "rate" which is: 1 USD = rate * (that currency)
+ */
+async function fetchFxLatestUsdTable() {
+  const res = await fetch(FLOATRATES_USD, { cache: "no-store" });
+  if (!res.ok) throw new Error(`FX latest HTTP ${res.status}`);
+  return res.json();
+}
 
-  // guard: if you ever see access_key, it's the wrong service
-  if (url.includes("access_key=")) {
-    throw new Error("FX misconfigured: access_key detected (wrong provider)");
+async function fetchUsdToCurrencyRate(currency) {
+  if (currency === "USD") return 1;
+
+  const table = await fetchFxLatestUsdTable();
+  const key = String(currency).toLowerCase();
+  const entry = table?.[key];
+
+  const rate = entry?.rate;
+  if (!Number.isFinite(rate) || rate <= 0) {
+    throw new Error(`FX rate missing for ${currency} from FloatRates`);
   }
-
-  const res = await fetch(url, { cache: "no-store" });
-  const text = await res.text();
-  let json = {};
-  try { json = JSON.parse(text); } catch { /* keep {} */ }
-
-  if (!res.ok) throw new Error(`FX HTTP ${res.status}: ${text}`);
-  if (json?.success === false) throw new Error(`FX error: ${text}`);
-
-  return json;
-}
-
-async function fetchFxLatestUsdTo(symbolsCsv) {
-  const url = `${FX_BASE}/latest?base=USD&symbols=${encodeURIComponent(symbolsCsv)}`;
-  return fxFetchJson(url); // { rates: { OMR: ... } }
-}
-
-async function fetchFxTimeseriesUsdTo({ start, end }, symbolsCsv) {
-  const url =
-    `${FX_BASE}/timeseries` +
-    `?base=USD` +
-    `&symbols=${encodeURIComponent(symbolsCsv)}` +
-    `&start_date=${encodeURIComponent(start)}` +
-    `&end_date=${encodeURIComponent(end)}`;
-  return fxFetchJson(url); // { rates: { "YYYY-MM-DD": { OMR: ... } } }
+  return rate; // 1 USD -> currency
 }
 
 /* -------------------- Gold: MetalpriceAPI -------------------- */
@@ -217,7 +195,7 @@ async function fetchGoldUsdPerOunce() {
   }
 
   const json = await res.json();
-  const usdXau = json?.rates?.USDXAU; // USD per 1 XAU (troy ounce)
+  const usdXau = json?.rates?.USDXAU;
   if (!Number.isFinite(usdXau) || usdXau <= 0) {
     throw new Error("Missing/invalid USDXAU rate from MetalpriceAPI");
   }
@@ -281,7 +259,7 @@ async function refreshAll() {
   try {
     if (btn) btn.textContent = "Refreshing...";
 
-    // 1) Gold latest USD/oz -> USD/g
+    // gold latest USD/oz -> USD/g
     const usdPerOunce = await fetchGoldUsdPerOunce();
     const usdPerGram24 = usdPerOunce / TROY_OUNCE_GRAMS;
 
@@ -289,33 +267,19 @@ async function refreshAll() {
     const today = yyyyMmDd(new Date());
     upsertGoldUsdPoint(today, usdPerGram24);
 
-    // 2) FX latest for current conversion
-    const symbols = GCC.map(x => x.code).join(",");
-    const fxLatest = await fetchFxLatestUsdTo(symbols);
-
-    const usdToTargetNow = state.currency === "USD" ? 1 : fxLatest?.rates?.[state.currency];
-    if (!Number.isFinite(usdToTargetNow) || usdToTargetNow <= 0) {
-      throw new Error(`FX rate missing for ${state.currency}. Latest response: ${JSON.stringify(fxLatest)}`);
-    }
+    // current FX (USD -> selected currency)
+    const usdToTargetNow = await fetchUsdToCurrencyRate(state.currency);
 
     // current 24K per gram in target currency
     state.price24PerGram = usdPerGram24 * usdToTargetNow;
 
-    // 3) FX timeseries for chart conversion
-    const { start, end } = lastNDaysRange(30);
-    const fxTs = await fetchFxTimeseriesUsdTo({ start, end }, symbols);
-
+    // chart conversion: use current FX for all points (no historical FX)
     const factor = karatFactor(state.karat);
     const history = (state.goldUsdHistory || []).slice(-30);
-
-    const converted = history
-      .map(p => {
-        const dayRates = fxTs?.rates?.[p.date];
-        const rate = state.currency === "USD" ? 1 : dayRates?.[state.currency];
-        if (!Number.isFinite(rate) || rate <= 0) return null;
-        return { label: p.date.slice(5), value: p.usdPerGram24 * rate * factor };
-      })
-      .filter(Boolean);
+    const converted = history.map(p => ({
+      label: p.date.slice(5),
+      value: p.usdPerGram24 * usdToTargetNow * factor
+    }));
 
     renderChart(converted);
 
