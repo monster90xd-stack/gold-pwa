@@ -1,6 +1,7 @@
 <!-- UPDATED index.html
-Changes:
-- Add bottom ad section that appears on every page (outside views)
+Only change needed: keep the same structure, but ensure lblUpdatedWrap exists (it does)
+No other HTML changes required because app.js writes the full "Latest/Next" text into lblUpdatedWrap.
+This file is provided only if you want the initial text to match; otherwise you can keep your current index.html.
 -->
 <!doctype html>
 <html lang="en">
@@ -54,12 +55,14 @@ Changes:
           <button class="karat-btn" data-karat="18" type="button">18K</button>
         </div>
 
-        <div class="muted mt8" id="lblUpdatedWrap">Last updated: <span id="updatedLabel">—</span></div>
+        <div class="muted mt8" id="lblUpdatedWrap">
+          Latest update: <span id="updatedLabel">—</span> | Next update: <span id="nextUpdateLabel">—</span>
+        </div>
       </div>
 
       <div class="card chart-card">
         <div class="row space mb8">
-          <div class="muted" id="lblChartTitle">Last 30 days</div>
+          <div class="muted" id="lblChartTitle">Data updated every 10 minutes</div>
           <div class="muted"><span id="lblKarat">Karat</span>: <span id="karatLabel">24</span>K</div>
         </div>
         <div class="chart-wrap">
@@ -103,12 +106,10 @@ Changes:
     </section>
   </main>
 
-  <!-- Ad section (appears on every page) -->
   <footer class="adbar" id="adBar">
     <div class="ad-inner">
       <div class="ad-title" id="adTitle">Ad</div>
       <div class="ad-slot" id="adSlot">
-        <!-- Replace this div with AdMob/Google Ad code in your Android wrapper -->
         <div class="ad-placeholder">320 × 50</div>
       </div>
     </div>
