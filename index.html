@@ -2,31 +2,31 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <meta name="theme-color" content="#0b1220" />
   <title>GCC Gold</title>
 
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" href="./icons/icon-192.png" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
-
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <div class="brand-title">GCC Gold</div>
-      <div class="brand-sub" dir="rtl">حاسبة الذهب</div>
+      <div id="appTitle" class="brand-title">GCC Gold</div>
+      <div id="appSub" class="brand-sub" dir="rtl">حاسبة الذهب</div>
     </div>
 
-    <button id="btnRefresh" class="btn btn-primary">Refresh</button>
+    <!-- Arabic toggle button (replaces Refresh) -->
+    <button id="btnLang" class="btn btn-primary" type="button">العربية</button>
   </header>
 
   <main class="container">
     <nav class="tabs">
-      <button class="tab active" data-tab="home" type="button">Home</button>
-      <button class="tab" data-tab="calc" type="button">Calculator</button>
-      <button class="tab" data-tab="currency" type="button">Currency</button>
+      <button class="tab active" data-tab="home" type="button" id="tabHome">Home</button>
+      <button class="tab" data-tab="calc" type="button" id="tabCalc">Calculator</button>
+      <button class="tab" data-tab="currency" type="button" id="tabCurrency">Currency</button>
     </nav>
 
     <!-- HOME -->
@@ -34,12 +34,11 @@
       <div class="card">
         <div class="row space">
           <div>
-            <div class="muted">Current price / gram</div>
+            <div class="muted" id="lblCurrentPrice">Current price / gram</div>
             <div id="pricePerGramLabel" class="big">—</div>
           </div>
-
           <div class="right">
-            <div class="muted">Currency</div>
+            <div class="muted" id="lblCurrency">Currency</div>
             <div class="pill">
               <span id="currencyLabel">USD</span>
               <button id="btnCurrency" class="btn btn-link" type="button">Change</button>
@@ -54,39 +53,40 @@
           <button class="karat-btn" data-karat="18" type="button">18K</button>
         </div>
 
-        <div class="muted mt8">Last updated: <span id="updatedLabel">—</span></div>
+        <div class="muted mt8" id="lblUpdatedWrap">Last updated: <span id="updatedLabel">—</span></div>
       </div>
 
       <div class="card chart-card">
         <div class="row space mb8">
-          <div class="muted">Last 30 stored days (converted)</div>
-          <div class="muted">Karat: <span id="karatLabel">24</span>K</div>
+          <div class="muted" id="lblChartTitle">Last 30 days</div>
+          <div class="muted"><span id="lblKarat">Karat</span>: <span id="karatLabel">24</span>K</div>
         </div>
-
         <div class="chart-wrap">
           <canvas id="priceChart"></canvas>
-        </div>
-
-        <div class="muted mt8">
-          Note: gold history points are stored when you refresh (1 point/day). FX history is fetched automatically.
         </div>
       </div>
     </section>
 
-    <!-- CALCULATOR -->
+    <!-- CALC -->
     <section id="viewCalc" class="view">
       <div class="card">
-        <div class="row space mb8">
-          <div class="muted">Price / gram (<span id="calcKaratLabel">24</span>K)</div>
+        <div class="row space">
+          <div class="muted"><span id="lblPricePerGramCalc">Price / gram</span> (<span id="calcKaratLabel">24</span>K)</div>
           <div id="calcPricePerGramLabel" class="big">—</div>
         </div>
 
-        <label class="muted" for="gramsInput">Grams</label>
-        <input id="gramsInput" class="input" inputmode="decimal" placeholder="e.g. 10" />
+        <div class="field mt12">
+          <label class="muted" id="lblGrams">Grams</label>
+          <input id="gramsInput" class="input" type="number" inputmode="decimal" placeholder="0" min="0" step="0.01" />
+        </div>
 
         <div class="row space mt12">
-          <div class="muted">Total (<span id="calcCurrencyLabel">USD</span>)</div>
+          <div class="muted" id="lblTotal">Total</div>
           <div id="totalLabel" class="big">—</div>
+        </div>
+
+        <div class="mt12">
+          <button class="btn btn-secondary" data-tab="home" type="button" id="btnBackHome1">Back</button>
         </div>
       </div>
     </section>
@@ -94,18 +94,17 @@
     <!-- CURRENCY -->
     <section id="viewCurrency" class="view">
       <div class="card">
-        <div class="row space mb8">
-          <div class="muted">Select currency</div>
+        <div class="row space">
+          <div class="big" id="lblChooseCurrency">Choose currency</div>
+          <button class="btn btn-secondary" data-tab="home" type="button" id="btnBackHome2">Back</button>
         </div>
-        <div id="currencyList" class="currency-list"></div>
+
+        <div id="currencyList" class="currency-list mt12"></div>
       </div>
     </section>
   </main>
 
-  <!-- Chart.js (required for chart rendering) -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-
-  <!-- App -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
   <script src="./app.js"></script>
 </body>
 </html>
