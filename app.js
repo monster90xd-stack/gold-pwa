@@ -1,11 +1,19 @@
 /* GCC Gold PWA
- * Gold: https://api.metalpriceapi.com/v1/latest (USDXAU)
- * FX:   https://api.exchangerate.host (latest + timeseries)  (NO KEY)
+ * Gold: metalpriceapi.com (USDXAU)
+ * FX:   exchangerate.host (NO KEY)  ✅
+ *
+ * IMPORTANT:
+ * You were seeing: {"code":101,"type":"missing_access_key"...}
+ * That error is from a DIFFERENT FX service (apilayer exchangeratesapi).
+ * This file hard-codes exchangerate.host and also logs the FX URLs so you can verify.
+ *
  * Chart: requires Chart.js loaded in index.html
  */
 
 const METALPRICE_API_KEY = "c04d99f9ac2f233a87135f316bbc2d90";
 const TROY_OUNCE_GRAMS = 31.1034768;
+
+const FX_BASE = "https://api.exchangerate.host"; // <-- NO KEY
 
 const GCC = [
   { code: "AED", name: "UAE Dirham", flag: "🇦🇪" },
@@ -97,11 +105,7 @@ function setActiveKaratButtons() {
 }
 
 function showView(which) {
-  const views = {
-    home: $("viewHome"),
-    calc: $("viewCalc"),
-    currency: $("viewCurrency")
-  };
+  const views = { home: $("viewHome"), calc: $("viewCalc"), currency: $("viewCurrency") };
   Object.values(views).forEach(v => v?.classList.remove("view-active"));
   views[which]?.classList.add("view-active");
 }
@@ -164,28 +168,39 @@ function renderCurrencyList() {
 }
 
 /* -------------------- FX: exchangerate.host (NO KEY) -------------------- */
-async function fetchFxLatestUsdTo(symbolsCsv) {
-  const url = `https://api.exchangerate.host/latest?base=USD&symbols=${encodeURIComponent(symbolsCsv)}`;
+async function fxFetchJson(url) {
+  // log to help you verify you are NOT hitting any "access_key" API
+  console.log("FX request:", url);
+
+  // guard: if you ever see access_key, it's the wrong service
+  if (url.includes("access_key=")) {
+    throw new Error("FX misconfigured: access_key detected (wrong provider)");
+  }
+
   const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`FX latest error ${res.status}`);
-  const json = await res.json();
-  if (json?.success === false) throw new Error(`FX latest error: ${JSON.stringify(json.error || json)}`);
-  return json; // { rates: { AED: ... } }
+  const text = await res.text();
+  let json = {};
+  try { json = JSON.parse(text); } catch { /* keep {} */ }
+
+  if (!res.ok) throw new Error(`FX HTTP ${res.status}: ${text}`);
+  if (json?.success === false) throw new Error(`FX error: ${text}`);
+
+  return json;
+}
+
+async function fetchFxLatestUsdTo(symbolsCsv) {
+  const url = `${FX_BASE}/latest?base=USD&symbols=${encodeURIComponent(symbolsCsv)}`;
+  return fxFetchJson(url); // { rates: { OMR: ... } }
 }
 
 async function fetchFxTimeseriesUsdTo({ start, end }, symbolsCsv) {
   const url =
-    `https://api.exchangerate.host/timeseries` +
+    `${FX_BASE}/timeseries` +
     `?base=USD` +
     `&symbols=${encodeURIComponent(symbolsCsv)}` +
     `&start_date=${encodeURIComponent(start)}` +
     `&end_date=${encodeURIComponent(end)}`;
-
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`FX timeseries error ${res.status}`);
-  const json = await res.json();
-  if (json?.success === false) throw new Error(`FX timeseries error: ${JSON.stringify(json.error || json)}`);
-  return json; // { rates: { "2026-03-01": { OMR: ... } } }
+  return fxFetchJson(url); // { rates: { "YYYY-MM-DD": { OMR: ... } } }
 }
 
 /* -------------------- Gold: MetalpriceAPI -------------------- */
@@ -280,7 +295,7 @@ async function refreshAll() {
 
     const usdToTargetNow = state.currency === "USD" ? 1 : fxLatest?.rates?.[state.currency];
     if (!Number.isFinite(usdToTargetNow) || usdToTargetNow <= 0) {
-      throw new Error(`FX rate missing for ${state.currency}`);
+      throw new Error(`FX rate missing for ${state.currency}. Latest response: ${JSON.stringify(fxLatest)}`);
     }
 
     // current 24K per gram in target currency
@@ -317,7 +332,6 @@ async function refreshAll() {
 
 /* -------------------- Events -------------------- */
 function bindEvents() {
-  // Tabs
   document.querySelectorAll(".tab").forEach((t) => {
     t.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
@@ -326,7 +340,6 @@ function bindEvents() {
     });
   });
 
-  // Currency shortcut
   $("btnCurrency")?.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
     document.querySelector('.tab[data-tab="currency"]')?.classList.add("active");
@@ -335,7 +348,6 @@ function bindEvents() {
 
   $("btnRefresh")?.addEventListener("click", refreshAll);
 
-  // Karat
   document.querySelectorAll(".karat-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const k = Number(btn.dataset.karat);
@@ -347,7 +359,6 @@ function bindEvents() {
     });
   });
 
-  // Calculator
   $("gramsInput")?.addEventListener("input", updateTotal);
 }
 
