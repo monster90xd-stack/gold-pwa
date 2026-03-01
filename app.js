@@ -1,9 +1,11 @@
 // UPDATED app.js
-// Changes:
-// 1) Chart updates immediately when currency changes (without waiting for refresh):
-//    - store USD 24k/gram in history points and convert for display.
-// 2) Mobile-friendly UI: (handled in styles.css below) + minor tweaks here.
-// 3) Ad section handled in index.html + styles.css (below).
+// Changes requested:
+// 1) Graph time labels now update only when the 10-min refresh runs (not on tab/page clicks).
+//    - We freeze the x-axis labels per refresh in `state.chart`.
+// 2) Add label: "Latest update: <time> | Next update: <time>" (English/Arabic).
+//
+// Requires index.html change: add <span id="nextUpdateLabel"></span> inside lblUpdatedWrap.
+// (Provided in index.html block below.)
 
 const METALPRICE_PROXY_URL = "https://gcc-gold-cache.monster-90xd.workers.dev/latest";
 
@@ -31,16 +33,24 @@ const state = {
   karat: Number(localStorage.getItem("karat") || DEFAULTS.karat),
   lang: localStorage.getItem("lang") || DEFAULTS.lang,
 
-  // latest USD->currency rate (CUR per USD)
   usdToCurrency: Number(localStorage.getItem("usdToCurrency") || 1),
 
-  // current 24k per gram in selected currency (derived)
   price24PerGram: 0,
+
+  // timestamps
+  lastUpdatedAt: Number(localStorage.getItem("lastUpdatedAt") || 0),
+
+  // label strings (for display; recomputed)
   lastUpdated: localStorage.getItem("lastUpdated") || "",
 
-  // store recent points in USD per gram (24k) so we can re-convert on currency change instantly:
-  // [{ t: epochMs, usdPerGram24: number }]
-  history: JSON.parse(localStorage.getItem("history") || "[]")
+  // [{ t, usdPerGram24 }]
+  history: JSON.parse(localStorage.getItem("history") || "[]"),
+
+  // Freeze chart labels/data based on last refresh, so tab clicks don't regenerate time labels.
+  chart: {
+    labels: JSON.parse(localStorage.getItem("chart.labels") || "[]"), // string[]
+    pointsT: JSON.parse(localStorage.getItem("chart.pointsT") || "[]") // number[] epoch ms
+  }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -51,22 +61,40 @@ function persist() {
   localStorage.setItem("currency", state.currency);
   localStorage.setItem("karat", String(state.karat));
   localStorage.setItem("lang", state.lang);
+
   localStorage.setItem("usdToCurrency", String(state.usdToCurrency || 1));
+
+  localStorage.setItem("lastUpdatedAt", String(state.lastUpdatedAt || 0));
   localStorage.setItem("lastUpdated", state.lastUpdated || "");
+
   localStorage.setItem("history", JSON.stringify(state.history || []));
+
+  localStorage.setItem("chart.labels", JSON.stringify(state.chart.labels || []));
+  localStorage.setItem("chart.pointsT", JSON.stringify(state.chart.pointsT || []));
 }
 
 function fmtMoney(value, currency) {
   if (!Number.isFinite(value)) return "—";
   try {
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency,
-      maximumFractionDigits: 2
-    }).format(value);
+    return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 2 }).format(value);
   } catch {
     return `${value.toFixed(2)} ${currency}`;
   }
+}
+
+function fmtTime(ts) {
+  if (!ts) return "—";
+  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtDateTime(ts) {
+  if (!ts) return "—";
+  return new Date(ts).toLocaleString();
+}
+
+function nextUpdateAt() {
+  if (!state.lastUpdatedAt) return 0;
+  return state.lastUpdatedAt + AUTO_REFRESH_MS;
 }
 
 function karatFactor(k) { return k / 24; }
@@ -84,9 +112,7 @@ function showView(tab) {
   Object.values(map).forEach((id) => $(id)?.classList.remove("view-active"));
   $(map[tab])?.classList.add("view-active");
 
-  document.querySelectorAll(".tab").forEach((b) => {
-    b.classList.toggle("active", b.dataset.tab === tab);
-  });
+  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
 }
 
 function updateTotal() {
@@ -127,12 +153,11 @@ function renderCurrencyList() {
       state.currency = c.code;
       persist();
 
-      // Update UI + chart immediately using last known usdToCurrency (if present)
+      // Update chart values instantly (x-axis labels remain frozen)
       applyUI();
 
-      // Then fetch fresh rates (optional but recommended)
+      // Then refresh to get accurate FX for that currency (worker cached anyway)
       await refreshNow();
-
       showView("home");
     });
     list.appendChild(div);
@@ -155,6 +180,16 @@ function pushHistoryPointUsd(usdPerGram24) {
   state.history = state.history.slice(-720);
 }
 
+// Freeze chart labels to refresh cadence, not UI events.
+function rebuildFrozenChartWindow() {
+  const points = (state.history || []).slice(-144);
+  const labels = points.map(p => fmtTime(p.t)); // HH:MM
+  const pointsT = points.map(p => p.t);
+
+  state.chart.labels = labels;
+  state.chart.pointsT = pointsT;
+}
+
 function renderChart() {
   const canvas = $("priceChart");
   if (!canvas || typeof Chart === "undefined") return;
@@ -162,11 +197,16 @@ function renderChart() {
   const ctx = canvas.getContext("2d");
   const factor = karatFactor(state.karat);
 
-  const points = (state.history || []).slice(-144);
-  const labels = points.map(p => new Date(p.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+  // Use frozen chart timestamps from last refresh
+  const pointsT = (state.chart.pointsT || []).slice(-144);
+  const labels = (state.chart.labels || []).slice(-144);
 
-  // Convert USD->selected currency for display
-  const data = points.map(p => p.usdPerGram24 * state.usdToCurrency * factor);
+  // Map timestamps to history points
+  const map = new Map((state.history || []).map(p => [p.t, p.usdPerGram24]));
+  const data = pointsT.map(t => {
+    const usdPerGram24 = map.get(t);
+    return Number.isFinite(usdPerGram24) ? (usdPerGram24 * state.usdToCurrency * factor) : null;
+  });
 
   const config = {
     type: "line",
@@ -179,7 +219,8 @@ function renderChart() {
         backgroundColor: "rgba(110,231,255,0.12)",
         tension: 0.25,
         fill: true,
-        pointRadius: 0
+        pointRadius: 0,
+        spanGaps: true
       }]
     },
     options: {
@@ -221,11 +262,15 @@ function applyTranslations() {
   $("lblCurrency").textContent = isAr ? "العملة" : "Currency";
   $("btnCurrency").textContent = isAr ? "تغيير" : "Change";
 
-  $("lblUpdatedWrap").innerHTML = isAr
-    ? `آخر تحديث: <span id="updatedLabel">${state.lastUpdated || "—"}</span>`
-    : `Last updated: <span id="updatedLabel">${state.lastUpdated || "—"}</span>`;
+  // Latest + Next update line
+  const latest = fmtDateTime(state.lastUpdatedAt);
+  const next = fmtDateTime(nextUpdateAt());
 
-  $("lblChartTitle").textContent = isAr ? "آخر البيانات (تحديث كل 10 دقائق)" : "Latest points (auto every 10 min)";
+  $("lblUpdatedWrap").innerHTML = isAr
+    ? `آخر تحديث: <span id="updatedLabel">${latest}</span> | التحديث القادم: <span id="nextUpdateLabel">${next}</span>`
+    : `Latest update: <span id="updatedLabel">${latest}</span> | Next update: <span id="nextUpdateLabel">${next}</span>`;
+
+  $("lblChartTitle").textContent = isAr ? "البيانات حسب آخر تحديث (كل 10 دقائق)" : "Data updated every 10 minutes";
   $("lblKarat").textContent = isAr ? "العيار" : "Karat";
 
   $("lblPricePerGramCalc").textContent = isAr ? "السعر / جرام" : "Price / gram";
@@ -235,7 +280,6 @@ function applyTranslations() {
   $("lblChooseCurrency").textContent = isAr ? "اختر العملة" : "Choose currency";
   $("btnBackHome2").textContent = isAr ? "رجوع" : "Back";
 
-  // Ad label
   const adTitle = $("adTitle");
   if (adTitle) adTitle.textContent = isAr ? "إعلان" : "Ad";
 }
@@ -250,7 +294,10 @@ function applyUI() {
   setActiveKaratButtons();
   updateTotal();
   renderCurrencyList();
+
+  // IMPORTANT: renderChart uses frozen labels; it won't change labels on tab clicks.
   renderChart();
+
   applyTranslations();
 }
 
@@ -269,8 +316,13 @@ async function refreshNow() {
     const usdPerGram24 = usdXau / TROY_OUNCE_GRAMS;
     state.price24PerGram = usdPerGram24 * usdToCur;
 
-    state.lastUpdated = new Date().toLocaleString();
+    state.lastUpdatedAt = Date.now();
+    state.lastUpdated = fmtDateTime(state.lastUpdatedAt);
+
     pushHistoryPointUsd(usdPerGram24);
+
+    // Freeze chart labels to this refresh
+    rebuildFrozenChartWindow();
 
     persist();
     applyUI();
@@ -291,9 +343,7 @@ function startAutoRefresh() {
 }
 
 function initEvents() {
-  document.querySelectorAll(".tab").forEach((btn) => {
-    btn.addEventListener("click", () => showView(btn.dataset.tab));
-  });
+  document.querySelectorAll(".tab").forEach((btn) => btn.addEventListener("click", () => showView(btn.dataset.tab)));
 
   $("btnCurrency")?.addEventListener("click", () => showView("currency"));
   $("btnBackHome1")?.addEventListener("click", () => showView("home"));
@@ -309,7 +359,7 @@ function initEvents() {
     btn.addEventListener("click", () => {
       state.karat = Number(btn.dataset.karat);
       persist();
-      applyUI(); // chart changes immediately too
+      applyUI(); // chart values update; labels remain frozen
     });
   });
 
@@ -317,9 +367,13 @@ function initEvents() {
 }
 
 (function init() {
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("./sw.js").catch(console.warn);
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(console.warn);
+
+  // Ensure chart freeze arrays are consistent on first load
+  if (!Array.isArray(state.chart.labels) || !Array.isArray(state.chart.pointsT) || state.chart.pointsT.length === 0) {
+    rebuildFrozenChartWindow();
   }
+
   initEvents();
   applyUI();
   refreshNow();
