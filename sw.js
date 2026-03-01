@@ -1,5 +1,5 @@
-// Bump cache name to ensure clients update
-const CACHE_NAME = "gcc-gold-pwa-v6";
+// Bump cache name to ensure clients update to the new app.js
+const CACHE_NAME = "gcc-gold-pwa-v7";
 
 const ASSETS = [
   "./",
@@ -12,9 +12,7 @@ const ASSETS = [
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
-  );
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));
   self.skipWaiting();
 });
 
