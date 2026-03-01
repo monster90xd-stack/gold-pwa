@@ -1,5 +1,5 @@
 // UPDATED sw.js (cache-bust)
-const CACHE_NAME = "gcc-gold-pwa-v8";
+const CACHE_NAME = "gcc-gold-pwa-v9";
 
 const ASSETS = [
   "./",
@@ -26,7 +26,5 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request))
-  );
+  event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request)));
 });
