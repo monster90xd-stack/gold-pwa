@@ -189,3 +189,5 @@ body{
 /* Chart sizing */
 .chart-wrap{ height: 240px; width: 100%; }
 canvas{ width:100% !important; height:100% !important; }
+.view { display: none; }
+.view.view-active { display: block; }
