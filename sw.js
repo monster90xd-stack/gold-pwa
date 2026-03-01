@@ -1,4 +1,5 @@
-const CACHE_NAME = "gcc-gold-pwa-v2";
+const CACHE_NAME = "gcc-gold-pwa-v5";
+
 const ASSETS = [
   "./",
   "./index.html",
@@ -9,27 +10,30 @@ const ASSETS = [
   "./icons/icon-512.png"
 ];
 
-// rest of file unchanged
-
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
+  );
+  self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+      Promise.all(keys.map((k) => (k === CACHE_NAME ? null : caches.delete(k))))
     )
   );
+  self.clients.claim();
 });
 
 self.addEventListener("fetch", (event) => {
-  const url = new URL(event.request.url);
+  const req = event.request;
+  const url = new URL(req.url);
 
-  if (url.origin === location.origin) {
-    event.respondWith(caches.match(event.request).then((c) => c || fetch(event.request)));
-    return;
-  }
+  // only handle same-origin requests (don’t cache API calls)
+  if (url.origin !== self.location.origin) return;
 
-  event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
+  event.respondWith(
+    caches.match(req).then((cached) => cached || fetch(req))
+  );
 });
