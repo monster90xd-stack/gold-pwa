@@ -231,39 +231,55 @@ function renderChart() {
   const ctx = canvas.getContext("2d");
   const factor = karatFactor(state.karat);
 
-  const raw = Array.isArray(state.monthPoints) ? state.monthPoints : [];
-  const MAX_POINTS = 500;
-  let points = raw;
-  if (raw.length > MAX_POINTS) {
-    const step = Math.ceil(raw.length / MAX_POINTS);
-    points = raw.filter((_, idx) => idx % step === 0);
-  }
+  // Build a fixed 10-minute timeline from 1st of month to now
+  const now = Date.now();
+  const d = new Date();
+  const monthStart = new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0).getTime();
 
-  const labels = points.map((p) => {
-    const d = new Date(p.t);
-    const hh = d.getHours();
-    const mm = d.getMinutes();
-    if (hh === 0 && mm === 0) return d.toLocaleDateString([], { month: "short", day: "2-digit" });
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  });
+  const BUCKET_MS = 10 * 60 * 1000;
+  const startBucket = Math.floor(monthStart / BUCKET_MS) * BUCKET_MS;
+  const endBucket = Math.floor(now / BUCKET_MS) * BUCKET_MS;
+
+  const timeline = [];
+  for (let t = startBucket; t <= endBucket; t += BUCKET_MS) timeline.push(t);
+
+  // Map stored points to their 10-min bucket (Worker should already bucket, but we normalize anyway)
+  const points = Array.isArray(state.monthPoints) ? state.monthPoints : [];
+  const bucketToRates = new Map();
+  for (const p of points) {
+    const bt = Math.floor(p.t / BUCKET_MS) * BUCKET_MS;
+    // keep latest point in that bucket (if duplicates ever happen)
+    bucketToRates.set(bt, p.rates);
+  }
 
   function usdToCurFromRates(rates, cur) {
     if (cur === "USD") return 1;
 
-    // preferred: CUR per USD (e.g. AED: 3.67)
+    // preferred: CUR per USD (e.g. AED)
     const direct = rates?.[cur];
     if (Number.isFinite(direct) && direct > 0) return direct;
 
-    // fallback: USD<cur> is USD per CUR (e.g. USDAED: 0.272...), invert it
-    const invKey = `USD${cur}`;
-    const inv = rates?.[invKey];
+    // fallback: USD<cur> is USD per CUR (invert)
+    const inv = rates?.[`USD${cur}`];
     if (Number.isFinite(inv) && inv > 0) return 1 / inv;
 
     return NaN;
   }
 
-  const data = points.map((p) => {
-    const rates = p?.rates;
+  // Labels: show date on day boundaries, otherwise HH:MM (sparser display via autoskip)
+  const labels = timeline.map((t) => {
+    const dt = new Date(t);
+    if (dt.getHours() === 0 && dt.getMinutes() === 0) {
+      return dt.toLocaleDateString([], { month: "short", day: "2-digit" });
+    }
+    return dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  });
+
+  // Data: for each bucket in the timeline, either compute value or leave gap (null)
+  const data = timeline.map((t) => {
+    const rates = bucketToRates.get(t);
+    if (!rates) return null;
+
     const usdXau = rates?.USDXAU;
     if (!Number.isFinite(usdXau) || usdXau <= 0) return null;
 
@@ -272,10 +288,13 @@ function renderChart() {
 
     const usdPerGram24 = usdXau / TROY_OUNCE_GRAMS;
     const curPerGram24 = usdPerGram24 * usdToCur;
+
     return curPerGram24 * factor;
   });
 
-  const fewPoints = points.length <= 2;
+  // Make single-point periods visible (early month / just launched)
+  const knownCount = data.reduce((n, v) => (v == null ? n : n + 1), 0);
+  const fewKnown = knownCount <= 2;
 
   const config = {
     type: "line",
@@ -288,9 +307,9 @@ function renderChart() {
         backgroundColor: "rgba(110,231,255,0.12)",
         tension: 0.25,
         fill: true,
-        pointRadius: fewPoints ? 4 : 0,       // <-- key change
+        pointRadius: fewKnown ? 3 : 0,
         pointHoverRadius: 6,
-        spanGaps: true
+        spanGaps: false // show gaps until we have data for those buckets
       }]
     },
     options: {
@@ -301,8 +320,14 @@ function renderChart() {
         tooltip: { callbacks: { label: (c) => fmtMoney(c.parsed.y, state.currency) } }
       },
       scales: {
-        x: { ticks: { color: "#9bb0d4", autoSkip: true, maxRotation: 0 }, grid: { color: "rgba(255,255,255,0.06)" } },
-        y: { ticks: { color: "#9bb0d4" }, grid: { color: "rgba(255,255,255,0.06)" } }
+        x: {
+          ticks: { color: "#9bb0d4", autoSkip: true, maxRotation: 0 },
+          grid: { color: "rgba(255,255,255,0.06)" }
+        },
+        y: {
+          ticks: { color: "#9bb0d4" },
+          grid: { color: "rgba(255,255,255,0.06)" }
+        }
       }
     }
   };
@@ -312,7 +337,7 @@ function renderChart() {
     chart.data.labels = labels;
     chart.data.datasets[0].data = data;
     chart.data.datasets[0].label = `${state.karat}K (${state.currency})`;
-    chart.data.datasets[0].pointRadius = fewPoints ? 4 : 0;
+    chart.data.datasets[0].pointRadius = fewKnown ? 3 : 0;
     chart.update();
   }
 }
