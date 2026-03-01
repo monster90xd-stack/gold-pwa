@@ -1,11 +1,11 @@
-// GCC Gold - MetalpriceAPI only (gold + FX), auto-refresh every 10 minutes.
-// Notes about MetalpriceAPI response you shared:
+// GCC Gold - uses Cloudflare Worker proxy (cached MetalpriceAPI).
+// Auto-refresh every 10 minutes; no refresh button; Arabic toggle button.
+// Uses Metalprice rates:
 // - rates.USDXAU = USD per 1 XAU (troy ounce)
-// - rates.XAU    = XAU per 1 USD (inverse)
-// We'll use USDXAU directly for gold spot USD/oz.
-// For currency conversion we fetch base=USD and requested currencies; rates.<CUR> is CUR per 1 USD.
+// - rates.<CUR>  = CUR per 1 USD (because base=USD)
 
-const METALPRICE_API_KEY = "c04d99f9ac2f233a87135f316bbc2d90";
+const METALPRICE_PROXY_URL = "https://gcc-gold-cache.monster-90xd.workers.dev/latest";
+
 const AUTO_REFRESH_MS = 10 * 60 * 1000; // 10 minutes
 const TROY_OUNCE_GRAMS = 31.1034768;
 
@@ -30,14 +30,10 @@ const state = {
   karat: Number(localStorage.getItem("karat") || DEFAULTS.karat),
   lang: localStorage.getItem("lang") || DEFAULTS.lang,
 
-  // computed current
-  usdPerOunceXau: 0,
-  usdToCurrency: 1,
   price24PerGram: 0,
   lastUpdated: localStorage.getItem("lastUpdated") || "",
 
-  // store last 30 refresh points as chart history (timestamp-based, since API latest is not historical here)
-  // [{ t: epochMs, price24PerGram: number }]
+  // store recent points for chart
   history: JSON.parse(localStorage.getItem("history") || "[]")
 };
 
@@ -124,28 +120,18 @@ function renderCurrencyList() {
       state.currency = c.code;
       persist();
       applyUI();
-      await refreshNow(); // update to selected currency immediately
+      await refreshNow();
       showView("home");
     });
     list.appendChild(div);
   }
 }
 
-// MetalpriceAPI call: get USDXAU and currency rates all together
-async function fetchLatestFromMetalprice() {
-  const currencyCodes = CURRENCIES.map(c => c.code).filter(c => c !== "USD");
-  const currencies = ["XAU", ...currencyCodes].join(",");
-
-  const url =
-    "https://api.metalpriceapi.com/v1/latest" +
-    `?api_key=${encodeURIComponent(METALPRICE_API_KEY)}` +
-    "&base=USD" +
-    `&currencies=${encodeURIComponent(currencies)}`;
-
-  const res = await fetch(url, { cache: "no-store" });
+async function fetchLatestRates() {
+  const res = await fetch(METALPRICE_PROXY_URL, { cache: "no-store" });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`MetalpriceAPI error ${res.status}: ${text}`);
+    throw new Error(`Proxy error ${res.status}: ${text}`);
   }
   return res.json();
 }
@@ -155,10 +141,7 @@ function pushHistoryPoint(price24PerGram) {
   state.history = Array.isArray(state.history) ? state.history : [];
   state.history.push({ t: now, price24PerGram });
 
-  // keep ~30 days worth of points if you refresh every 10 minutes:
-  // 30 days * 24h * 6 per hour = 4320 points. That's big.
-  // We'll keep last 720 points (~5 days) to avoid bloating localStorage.
-  // If you truly want 30 days at 10-min resolution, tell me and we can compress.
+  // keep last 720 points (~5 days at 10-min)
   state.history = state.history.slice(-720);
 }
 
@@ -169,14 +152,8 @@ function renderChart() {
   const ctx = canvas.getContext("2d");
   const factor = karatFactor(state.karat);
 
-  // Use last 144 points (~24 hours at 10-min refresh) for readability
-  const points = (state.history || []).slice(-144);
-
-  const labels = points.map(p => {
-    const d = new Date(p.t);
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  });
-
+  const points = (state.history || []).slice(-144); // ~24h view
+  const labels = points.map(p => new Date(p.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
   const data = points.map(p => p.price24PerGram * factor);
 
   const config = {
@@ -219,7 +196,6 @@ function renderChart() {
 function applyTranslations() {
   const isAr = state.lang === "ar";
 
-  // overall direction (keep numbers ok)
   document.documentElement.lang = isAr ? "ar" : "en";
   document.documentElement.dir = isAr ? "rtl" : "ltr";
 
@@ -232,7 +208,11 @@ function applyTranslations() {
   $("lblCurrentPrice").textContent = isAr ? "السعر الحالي / جرام" : "Current price / gram";
   $("lblCurrency").textContent = isAr ? "العملة" : "Currency";
   $("btnCurrency").textContent = isAr ? "تغيير" : "Change";
-  $("lblUpdatedWrap").childNodes[0].nodeValue = isAr ? "آخر تحديث: " : "Last updated: ";
+
+  // safer than manipulating childNodes directly
+  $("lblUpdatedWrap").innerHTML = isAr
+    ? `آخر تحديث: <span id="updatedLabel">${state.lastUpdated || "—"}</span>`
+    : `Last updated: <span id="updatedLabel">${state.lastUpdated || "—"}</span>`;
 
   $("lblChartTitle").textContent = isAr ? "آخر البيانات (تحديث كل 10 دقائق)" : "Latest points (auto every 10 min)";
   $("lblKarat").textContent = isAr ? "العيار" : "Karat";
@@ -252,7 +232,7 @@ function applyUI() {
   $("pricePerGramLabel").textContent = fmtMoney(perGramSelectedK, state.currency);
   $("calcPricePerGramLabel").textContent = fmtMoney(perGramSelectedK, state.currency);
 
-  $("updatedLabel").textContent = state.lastUpdated || "—";
+  // updatedLabel is recreated in applyTranslations, so set translations last
   setActiveKaratButtons();
   updateTotal();
   renderCurrencyList();
@@ -262,18 +242,13 @@ function applyUI() {
 
 async function refreshNow() {
   try {
-    const json = await fetchLatestFromMetalprice();
+    const json = await fetchLatestRates();
 
-    // gold USD/oz
     const usdXau = json?.rates?.USDXAU;
     if (!Number.isFinite(usdXau) || usdXau <= 0) throw new Error("Missing USDXAU rate");
 
-    // currency rate: CUR per 1 USD
     const usdToCur = state.currency === "USD" ? 1 : json?.rates?.[state.currency];
     if (!Number.isFinite(usdToCur) || usdToCur <= 0) throw new Error(`Missing ${state.currency} rate`);
-
-    state.usdPerOunceXau = usdXau;
-    state.usdToCurrency = usdToCur;
 
     const usdPerGram24 = usdXau / TROY_OUNCE_GRAMS;
     state.price24PerGram = usdPerGram24 * usdToCur;
@@ -285,36 +260,35 @@ async function refreshNow() {
     applyUI();
   } catch (e) {
     console.error(e);
-    alert(String(e?.message || e));
+    if (document.visibilityState === "visible") alert(String(e?.message || e));
   }
 }
 
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refreshNow();
+  });
+
   refreshTimer = setInterval(refreshNow, AUTO_REFRESH_MS);
 }
 
 function initEvents() {
-  // Tabs
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => showView(btn.dataset.tab));
   });
 
-  // Currency button
   $("btnCurrency")?.addEventListener("click", () => showView("currency"));
-
-  // Back buttons
   $("btnBackHome1")?.addEventListener("click", () => showView("home"));
   $("btnBackHome2")?.addEventListener("click", () => showView("home"));
 
-  // Language toggle button
   $("btnLang")?.addEventListener("click", () => {
     state.lang = state.lang === "ar" ? "en" : "ar";
     persist();
     applyUI();
   });
 
-  // Karat buttons
   document.querySelectorAll(".karat-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.karat = Number(btn.dataset.karat);
@@ -323,18 +297,15 @@ function initEvents() {
     });
   });
 
-  // Calculator grams input
   $("gramsInput")?.addEventListener("input", updateTotal);
 }
 
 (function init() {
-  // Service worker
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(console.warn);
   }
-
   initEvents();
-  applyUI();      // initial render (with cached state)
-  refreshNow();   // fetch immediately
+  applyUI();
+  refreshNow();
   startAutoRefresh();
 })();
