@@ -231,7 +231,6 @@ function renderChart() {
   const ctx = canvas.getContext("2d");
   const factor = karatFactor(state.karat);
 
-  // Make chart lighter on mobile: if too many points, sample
   const raw = Array.isArray(state.monthPoints) ? state.monthPoints : [];
   const MAX_POINTS = 500;
   let points = raw;
@@ -242,24 +241,41 @@ function renderChart() {
 
   const labels = points.map((p) => {
     const d = new Date(p.t);
-    // show "Mar 01" at midnight, else "HH:MM"
     const hh = d.getHours();
     const mm = d.getMinutes();
     if (hh === 0 && mm === 0) return d.toLocaleDateString([], { month: "short", day: "2-digit" });
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   });
 
+  function usdToCurFromRates(rates, cur) {
+    if (cur === "USD") return 1;
+
+    // preferred: CUR per USD (e.g. AED: 3.67)
+    const direct = rates?.[cur];
+    if (Number.isFinite(direct) && direct > 0) return direct;
+
+    // fallback: USD<cur> is USD per CUR (e.g. USDAED: 0.272...), invert it
+    const invKey = `USD${cur}`;
+    const inv = rates?.[invKey];
+    if (Number.isFinite(inv) && inv > 0) return 1 / inv;
+
+    return NaN;
+  }
+
   const data = points.map((p) => {
-    const usdXau = p?.rates?.USDXAU;
+    const rates = p?.rates;
+    const usdXau = rates?.USDXAU;
     if (!Number.isFinite(usdXau) || usdXau <= 0) return null;
 
-    const usdToCur = state.currency === "USD" ? 1 : p?.rates?.[state.currency];
+    const usdToCur = usdToCurFromRates(rates, state.currency);
     if (!Number.isFinite(usdToCur) || usdToCur <= 0) return null;
 
     const usdPerGram24 = usdXau / TROY_OUNCE_GRAMS;
     const curPerGram24 = usdPerGram24 * usdToCur;
     return curPerGram24 * factor;
   });
+
+  const fewPoints = points.length <= 2;
 
   const config = {
     type: "line",
@@ -272,7 +288,8 @@ function renderChart() {
         backgroundColor: "rgba(110,231,255,0.12)",
         tension: 0.25,
         fill: true,
-        pointRadius: 0,
+        pointRadius: fewPoints ? 4 : 0,       // <-- key change
+        pointHoverRadius: 6,
         spanGaps: true
       }]
     },
@@ -295,6 +312,7 @@ function renderChart() {
     chart.data.labels = labels;
     chart.data.datasets[0].data = data;
     chart.data.datasets[0].label = `${state.karat}K (${state.currency})`;
+    chart.data.datasets[0].pointRadius = fewPoints ? 4 : 0;
     chart.update();
   }
 }
