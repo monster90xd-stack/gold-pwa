@@ -1,4 +1,4 @@
-const CACHE_NAME = "gcc-gold-pwa-v6";
+const CACHE_NAME = "gcc-gold-pwa-v7";
 
 const ASSETS = [
   "./",
@@ -11,9 +11,7 @@ const ASSETS = [
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
-  );
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));
   self.skipWaiting();
 });
 
@@ -33,7 +31,5 @@ self.addEventListener("fetch", (event) => {
   // Only cache same-origin app shell; never intercept API calls.
   if (url.origin !== self.location.origin) return;
 
-  event.respondWith(
-    caches.match(req).then((cached) => cached || fetch(req))
-  );
+  event.respondWith(caches.match(req).then((cached) => cached || fetch(req)));
 });
