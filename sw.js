@@ -1,4 +1,4 @@
-const CACHE_NAME = "gcc-gold-pwa-v10";
+const CACHE_NAME = "gcc-gold-pwa-v11";
 
 const ASSETS = [
   "./",
