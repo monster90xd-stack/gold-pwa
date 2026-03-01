@@ -1,53 +1,56 @@
-/* GCC Gold PWA
- * Gold: MetalpriceAPI (USDXAU) - fetched ONCE per day (cached)
- * FX:   FloatRates (USD table) - fetched on refresh (no key)
- * Chart: uses stored daily gold points in USD and converts using CURRENT fx rate.
- *
- * Required elements in index.html:
- * btnRefresh, btnCurrency, currencyLabel, pricePerGramLabel, updatedLabel
- * gramsInput, totalLabel, calcPricePerGramLabel, calcCurrencyLabel
- * viewHome, viewCalc, viewCurrency, currencyList
- * canvas#priceChart and Chart.js loaded
- */
+// GCC Gold - MetalpriceAPI only (gold + FX), auto-refresh every 10 minutes.
+// Notes about MetalpriceAPI response you shared:
+// - rates.USDXAU = USD per 1 XAU (troy ounce)
+// - rates.XAU    = XAU per 1 USD (inverse)
+// We'll use USDXAU directly for gold spot USD/oz.
+// For currency conversion we fetch base=USD and requested currencies; rates.<CUR> is CUR per 1 USD.
 
 const METALPRICE_API_KEY = "c04d99f9ac2f233a87135f316bbc2d90";
+const AUTO_REFRESH_MS = 10 * 60 * 1000; // 10 minutes
 const TROY_OUNCE_GRAMS = 31.1034768;
 
-const FLOATRATES_USD = "https://www.floatrates.com/daily/usd.json";
-
 const GCC = [
-  { code: "AED", name: "UAE Dirham", flag: "🇦🇪" },
-  { code: "SAR", name: "Saudi Riyal", flag: "🇸🇦" },
-  { code: "KWD", name: "Kuwaiti Dinar", flag: "🇰🇼" },
-  { code: "QAR", name: "Qatari Riyal", flag: "🇶🇦" },
-  { code: "BHD", name: "Bahraini Dinar", flag: "🇧🇭" },
-  { code: "OMR", name: "Omani Rial", flag: "🇴🇲" }
+  { code: "AED", name_en: "UAE Dirham", name_ar: "درهم إماراتي", flag: "🇦🇪" },
+  { code: "SAR", name_en: "Saudi Riyal", name_ar: "ريال سعودي", flag: "🇸🇦" },
+  { code: "KWD", name_en: "Kuwaiti Dinar", name_ar: "دينار كويتي", flag: "🇰🇼" },
+  { code: "QAR", name_en: "Qatari Riyal", name_ar: "ريال قطري", flag: "🇶🇦" },
+  { code: "BHD", name_en: "Bahraini Dinar", name_ar: "دينار بحريني", flag: "🇧🇭" },
+  { code: "OMR", name_en: "Omani Rial", name_ar: "ريال عماني", flag: "🇴🇲" }
 ];
 
-const CURRENCIES = [{ code: "USD", name: "US Dollar", flag: "🇺🇸" }, ...GCC];
+const CURRENCIES = [
+  { code: "USD", name_en: "US Dollar", name_ar: "دولار أمريكي", flag: "🇺🇸" },
+  ...GCC
+];
+
+const DEFAULTS = { currency: "USD", karat: 24, lang: "en" };
 
 const state = {
-  currency: localStorage.getItem("currency") || "USD",
-  karat: Number(localStorage.getItem("karat") || 24),
+  currency: localStorage.getItem("currency") || DEFAULTS.currency,
+  karat: Number(localStorage.getItem("karat") || DEFAULTS.karat),
+  lang: localStorage.getItem("lang") || DEFAULTS.lang,
 
-  // current 24K per gram in selected currency
-  price24PerGram: Number(localStorage.getItem("price24PerGram") || 0),
+  // computed current
+  usdPerOunceXau: 0,
+  usdToCurrency: 1,
+  price24PerGram: 0,
+  lastUpdated: localStorage.getItem("lastUpdated") || "",
 
-  // gold daily points stored in USD/gram (24K): [{date:"YYYY-MM-DD", usdPerGram24:number}]
-  goldUsdHistory: JSON.parse(localStorage.getItem("goldUsdHistory") || "[]"),
-
-  lastUpdated: localStorage.getItem("lastUpdated") || ""
+  // store last 30 refresh points as chart history (timestamp-based, since API latest is not historical here)
+  // [{ t: epochMs, price24PerGram: number }]
+  history: JSON.parse(localStorage.getItem("history") || "[]")
 };
 
 const $ = (id) => document.getElementById(id);
 let chart;
+let refreshTimer;
 
 function persist() {
   localStorage.setItem("currency", state.currency);
   localStorage.setItem("karat", String(state.karat));
-  localStorage.setItem("price24PerGram", String(state.price24PerGram || 0));
-  localStorage.setItem("goldUsdHistory", JSON.stringify(state.goldUsdHistory || []));
+  localStorage.setItem("lang", state.lang);
   localStorage.setItem("lastUpdated", state.lastUpdated || "");
+  localStorage.setItem("history", JSON.stringify(state.history || []));
 }
 
 function fmtMoney(value, currency) {
@@ -63,71 +66,38 @@ function fmtMoney(value, currency) {
   }
 }
 
-function yyyyMmDd(d) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
 function karatFactor(k) { return k / 24; }
-
-function pricePerGramSelectedKarat() {
-  return (state.price24PerGram || 0) * karatFactor(state.karat);
-}
-
-function upsertGoldUsdPoint(dateStr, usdPerGram24) {
-  const arr = Array.isArray(state.goldUsdHistory) ? state.goldUsdHistory : [];
-  const idx = arr.findIndex(p => p.date === dateStr);
-  const point = { date: dateStr, usdPerGram24 };
-
-  if (idx >= 0) arr[idx] = point;
-  else arr.push(point);
-
-  arr.sort((a, b) => a.date.localeCompare(b.date));
-  state.goldUsdHistory = arr.slice(-90);
-}
 
 function setActiveKaratButtons() {
   document.querySelectorAll(".karat-btn").forEach((btn) => {
-    const k = Number(btn.dataset.karat);
-    btn.classList.toggle("active", k === state.karat);
+    btn.classList.toggle("active", Number(btn.dataset.karat) === state.karat);
   });
-  $("karatLabel") && ($("karatLabel").textContent = String(state.karat));
-  $("calcKaratLabel") && ($("calcKaratLabel").textContent = String(state.karat));
+  const k1 = $("karatLabel"); if (k1) k1.textContent = String(state.karat);
+  const k2 = $("calcKaratLabel"); if (k2) k2.textContent = String(state.karat);
 }
 
-function showView(which) {
-  const views = { home: $("viewHome"), calc: $("viewCalc"), currency: $("viewCurrency") };
-  Object.values(views).forEach(v => v?.classList.remove("view-active"));
-  views[which]?.classList.add("view-active");
+function showView(tab) {
+  const map = { home: "viewHome", calc: "viewCalc", currency: "viewCurrency" };
+  Object.values(map).forEach((id) => $(id)?.classList.remove("view-active"));
+  $(map[tab])?.classList.add("view-active");
+
+  document.querySelectorAll(".tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === tab);
+  });
 }
 
 function updateTotal() {
-  const gramsEl = $("gramsInput");
-  const totalEl = $("totalLabel");
-  if (!gramsEl || !totalEl) return;
+  const grams = Number($("gramsInput")?.value || 0);
+  const out = $("totalLabel");
+  if (!out) return;
 
-  const grams = Number(String(gramsEl.value || "").replace(",", "."));
   if (!Number.isFinite(grams) || grams <= 0) {
-    totalEl.textContent = "—";
+    out.textContent = "—";
     return;
   }
-  totalEl.textContent = fmtMoney(grams * pricePerGramSelectedKarat(), state.currency);
-}
 
-function applyUI() {
-  $("currencyLabel") && ($("currencyLabel").textContent = state.currency);
-  $("calcCurrencyLabel") && ($("calcCurrencyLabel").textContent = state.currency);
-
-  $("pricePerGramLabel") && ($("pricePerGramLabel").textContent = fmtMoney(pricePerGramSelectedKarat(), state.currency));
-  $("calcPricePerGramLabel") && ($("calcPricePerGramLabel").textContent = fmtMoney(pricePerGramSelectedKarat(), state.currency));
-
-  $("updatedLabel") && ($("updatedLabel").textContent = state.lastUpdated || "—");
-
-  setActiveKaratButtons();
-  updateTotal();
-  renderCurrencyList();
+  const perGram = state.price24PerGram * karatFactor(state.karat);
+  out.textContent = fmtMoney(grams * perGram, state.currency);
 }
 
 function renderCurrencyList() {
@@ -135,239 +105,236 @@ function renderCurrencyList() {
   if (!list) return;
   list.innerHTML = "";
 
-  CURRENCIES.forEach((c) => {
-    const row = document.createElement("button");
-    row.className = "currency-item";
-    row.type = "button";
-    row.innerHTML = `
-      <span class="currency-flag">${c.flag}</span>
-      <span class="currency-code">${c.code}</span>
-      <span class="currency-name">${c.name}</span>
-      <span class="currency-check">${c.code === state.currency ? "✓" : ""}</span>
+  const isAr = state.lang === "ar";
+
+  for (const c of CURRENCIES) {
+    const div = document.createElement("div");
+    div.className = "currency-item";
+    div.innerHTML = `
+      <div class="currency-left">
+        <div class="flag">${c.flag}</div>
+        <div>
+          <div class="currency-code">${c.code}</div>
+          <div class="currency-name">${isAr ? c.name_ar : c.name_en}</div>
+        </div>
+      </div>
+      <div class="check">${c.code === state.currency ? "✓" : ""}</div>
     `;
-    row.addEventListener("click", async () => {
+    div.addEventListener("click", async () => {
       state.currency = c.code;
       persist();
       applyUI();
-
-      await refreshAll({ forceGold: false });
-
-      document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
-      document.querySelector('.tab[data-tab="home"]')?.classList.add("active");
+      await refreshNow(); // update to selected currency immediately
       showView("home");
     });
-    list.appendChild(row);
-  });
-}
-
-/* -------------------- FX: FloatRates (NO KEY) -------------------- */
-/* Table: keys are lowercase currency codes; entry.rate means 1 USD = rate * currency */
-async function fetchFxLatestUsdTable() {
-  const res = await fetch(FLOATRATES_USD, { cache: "no-store" });
-  if (!res.ok) throw new Error(`FX latest HTTP ${res.status}`);
-  return res.json();
-}
-
-async function fetchUsdToCurrencyRate(currency) {
-  if (currency === "USD") return 1;
-
-  const table = await fetchFxLatestUsdTable();
-  const key = String(currency).toLowerCase();
-  const entry = table?.[key];
-
-  const rate = entry?.rate;
-  if (!Number.isFinite(rate) || rate <= 0) {
-    throw new Error(`FX rate missing for ${currency} from FloatRates`);
+    list.appendChild(div);
   }
-  return rate;
 }
 
-/* -------------------- Gold: MetalpriceAPI (daily cached) -------------------- */
-async function fetchGoldUsdPerOunce() {
+// MetalpriceAPI call: get USDXAU and currency rates all together
+async function fetchLatestFromMetalprice() {
+  const currencyCodes = CURRENCIES.map(c => c.code).filter(c => c !== "USD");
+  const currencies = ["XAU", ...currencyCodes].join(",");
+
   const url =
     "https://api.metalpriceapi.com/v1/latest" +
     `?api_key=${encodeURIComponent(METALPRICE_API_KEY)}` +
-    "&base=USD&currencies=EUR,XAU,XAG";
+    "&base=USD" +
+    `&currencies=${encodeURIComponent(currencies)}`;
 
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`MetalpriceAPI error ${res.status}: ${text}`);
   }
-
-  const json = await res.json();
-  const usdXau = json?.rates?.USDXAU;
-  if (!Number.isFinite(usdXau) || usdXau <= 0) {
-    throw new Error("Missing/invalid USDXAU rate from MetalpriceAPI");
-  }
-  return usdXau;
+  return res.json();
 }
 
-function loadGoldCache() {
-  try {
-    return JSON.parse(localStorage.getItem("goldDailyCache") || "null");
-  } catch {
-    return null;
-  }
+function pushHistoryPoint(price24PerGram) {
+  const now = Date.now();
+  state.history = Array.isArray(state.history) ? state.history : [];
+  state.history.push({ t: now, price24PerGram });
+
+  // keep ~30 days worth of points if you refresh every 10 minutes:
+  // 30 days * 24h * 6 per hour = 4320 points. That's big.
+  // We'll keep last 720 points (~5 days) to avoid bloating localStorage.
+  // If you truly want 30 days at 10-min resolution, tell me and we can compress.
+  state.history = state.history.slice(-720);
 }
 
-function saveGoldCache(cache) {
-  localStorage.setItem("goldDailyCache", JSON.stringify(cache));
-}
-
-/** returns { usdPerGram24, dateStr, source } */
-async function getGoldUsdPerGram24Daily({ force = false } = {}) {
-  const today = yyyyMmDd(new Date());
-  const cached = loadGoldCache();
-
-  if (
-    !force &&
-    cached?.dateStr === today &&
-    Number.isFinite(cached?.usdPerGram24) &&
-    cached.usdPerGram24 > 0
-  ) {
-    return { usdPerGram24: cached.usdPerGram24, dateStr: today, source: "cache" };
-  }
-
-  const usdPerOunce = await fetchGoldUsdPerOunce();
-  const usdPerGram24 = usdPerOunce / TROY_OUNCE_GRAMS;
-
-  saveGoldCache({ dateStr: today, usdPerGram24 });
-  return { usdPerGram24, dateStr: today, source: "api" };
-}
-
-/* -------------------- Chart -------------------- */
-function renderChart(historyConverted) {
+function renderChart() {
   const canvas = $("priceChart");
-  if (!canvas) return;
+  if (!canvas || typeof Chart === "undefined") return;
 
-  if (typeof Chart === "undefined") {
-    console.warn("Chart.js not loaded; chart will not render.");
-    return;
-  }
-
-  const labels = historyConverted.map(p => p.label);
-  const data = historyConverted.map(p => p.value);
   const ctx = canvas.getContext("2d");
-  const datasetLabel = `${state.karat}K (${state.currency})`;
+  const factor = karatFactor(state.karat);
 
-  if (!chart) {
-    chart = new Chart(ctx, {
-      type: "line",
-      data: {
-        labels,
-        datasets: [{
-          label: datasetLabel,
-          data,
-          borderColor: "rgba(110,231,255,0.95)",
-          backgroundColor: "rgba(110,231,255,0.12)",
-          tension: 0.25,
-          fill: true,
-          pointRadius: 0
-        }]
+  // Use last 144 points (~24 hours at 10-min refresh) for readability
+  const points = (state.history || []).slice(-144);
+
+  const labels = points.map(p => {
+    const d = new Date(p.t);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  });
+
+  const data = points.map(p => p.price24PerGram * factor);
+
+  const config = {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: `${state.karat}K (${state.currency})`,
+        data,
+        borderColor: "rgba(110,231,255,0.95)",
+        backgroundColor: "rgba(110,231,255,0.12)",
+        tension: 0.25,
+        fill: true,
+        pointRadius: 0
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: "#e8eefc" } },
+        tooltip: { callbacks: { label: (c) => fmtMoney(c.parsed.y, state.currency) } }
       },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: { labels: { color: "#e8eefc" } },
-          tooltip: { callbacks: { label: (c) => fmtMoney(c.parsed.y, state.currency) } }
-        },
-        scales: {
-          x: { ticks: { color: "#9bb0d4" }, grid: { color: "rgba(255,255,255,0.06)" } },
-          y: { ticks: { color: "#9bb0d4" }, grid: { color: "rgba(255,255,255,0.06)" } }
-        }
+      scales: {
+        x: { ticks: { color: "#9bb0d4" }, grid: { color: "rgba(255,255,255,0.06)" } },
+        y: { ticks: { color: "#9bb0d4" }, grid: { color: "rgba(255,255,255,0.06)" } }
       }
-    });
-  } else {
+    }
+  };
+
+  if (!chart) chart = new Chart(ctx, config);
+  else {
     chart.data.labels = labels;
     chart.data.datasets[0].data = data;
-    chart.data.datasets[0].label = datasetLabel;
+    chart.data.datasets[0].label = `${state.karat}K (${state.currency})`;
     chart.update();
   }
 }
 
-/* -------------------- Main refresh -------------------- */
-async function refreshAll({ forceGold = false } = {}) {
-  const btn = $("btnRefresh");
+function applyTranslations() {
+  const isAr = state.lang === "ar";
+
+  // overall direction (keep numbers ok)
+  document.documentElement.lang = isAr ? "ar" : "en";
+  document.documentElement.dir = isAr ? "rtl" : "ltr";
+
+  $("btnLang").textContent = isAr ? "English" : "العربية";
+
+  $("tabHome").textContent = isAr ? "الرئيسية" : "Home";
+  $("tabCalc").textContent = isAr ? "الحاسبة" : "Calculator";
+  $("tabCurrency").textContent = isAr ? "العملة" : "Currency";
+
+  $("lblCurrentPrice").textContent = isAr ? "السعر الحالي / جرام" : "Current price / gram";
+  $("lblCurrency").textContent = isAr ? "العملة" : "Currency";
+  $("btnCurrency").textContent = isAr ? "تغيير" : "Change";
+  $("lblUpdatedWrap").childNodes[0].nodeValue = isAr ? "آخر تحديث: " : "Last updated: ";
+
+  $("lblChartTitle").textContent = isAr ? "آخر البيانات (تحديث كل 10 دقائق)" : "Latest points (auto every 10 min)";
+  $("lblKarat").textContent = isAr ? "العيار" : "Karat";
+
+  $("lblPricePerGramCalc").textContent = isAr ? "السعر / جرام" : "Price / gram";
+  $("lblGrams").textContent = isAr ? "الوزن (جرام)" : "Grams";
+  $("lblTotal").textContent = isAr ? "الإجمالي" : "Total";
+  $("btnBackHome1").textContent = isAr ? "رجوع" : "Back";
+  $("lblChooseCurrency").textContent = isAr ? "اختر العملة" : "Choose currency";
+  $("btnBackHome2").textContent = isAr ? "رجوع" : "Back";
+}
+
+function applyUI() {
+  $("currencyLabel").textContent = state.currency;
+
+  const perGramSelectedK = state.price24PerGram * karatFactor(state.karat);
+  $("pricePerGramLabel").textContent = fmtMoney(perGramSelectedK, state.currency);
+  $("calcPricePerGramLabel").textContent = fmtMoney(perGramSelectedK, state.currency);
+
+  $("updatedLabel").textContent = state.lastUpdated || "—";
+  setActiveKaratButtons();
+  updateTotal();
+  renderCurrencyList();
+  renderChart();
+  applyTranslations();
+}
+
+async function refreshNow() {
   try {
-    if (btn) btn.textContent = "Refreshing...";
+    const json = await fetchLatestFromMetalprice();
 
-    // 1) gold (daily cached)
-    const gold = await getGoldUsdPerGram24Daily({ force: forceGold });
-    const usdPerGram24 = gold.usdPerGram24;
+    // gold USD/oz
+    const usdXau = json?.rates?.USDXAU;
+    if (!Number.isFinite(usdXau) || usdXau <= 0) throw new Error("Missing USDXAU rate");
 
-    // store today's USD point (1 point/day)
-    upsertGoldUsdPoint(gold.dateStr, usdPerGram24);
+    // currency rate: CUR per 1 USD
+    const usdToCur = state.currency === "USD" ? 1 : json?.rates?.[state.currency];
+    if (!Number.isFinite(usdToCur) || usdToCur <= 0) throw new Error(`Missing ${state.currency} rate`);
 
-    // 2) FX current
-    const usdToTargetNow = await fetchUsdToCurrencyRate(state.currency);
+    state.usdPerOunceXau = usdXau;
+    state.usdToCurrency = usdToCur;
 
-    // 3) UI price
-    state.price24PerGram = usdPerGram24 * usdToTargetNow;
+    const usdPerGram24 = usdXau / TROY_OUNCE_GRAMS;
+    state.price24PerGram = usdPerGram24 * usdToCur;
 
-    // 4) Chart conversion uses current FX for all points (no historical FX)
-    const factor = karatFactor(state.karat);
-    const history = (state.goldUsdHistory || []).slice(-30);
-    const converted = history.map(p => ({
-      label: p.date.slice(5),
-      value: p.usdPerGram24 * usdToTargetNow * factor
-    }));
+    state.lastUpdated = new Date().toLocaleString();
+    pushHistoryPoint(state.price24PerGram);
 
-    renderChart(converted);
-
-    state.lastUpdated = `${new Date().toLocaleString()} (gold: ${gold.source})`;
     persist();
     applyUI();
   } catch (e) {
     console.error(e);
     alert(String(e?.message || e));
-  } finally {
-    if (btn) btn.textContent = "Refresh";
   }
 }
 
-/* -------------------- Events -------------------- */
-function bindEvents() {
-  document.querySelectorAll(".tab").forEach((t) => {
-    t.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
-      t.classList.add("active");
-      showView(t.dataset.tab);
-    });
+function startAutoRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(refreshNow, AUTO_REFRESH_MS);
+}
+
+function initEvents() {
+  // Tabs
+  document.querySelectorAll(".tab").forEach((btn) => {
+    btn.addEventListener("click", () => showView(btn.dataset.tab));
   });
 
-  $("btnCurrency")?.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
-    document.querySelector('.tab[data-tab="currency"]')?.classList.add("active");
-    showView("currency");
+  // Currency button
+  $("btnCurrency")?.addEventListener("click", () => showView("currency"));
+
+  // Back buttons
+  $("btnBackHome1")?.addEventListener("click", () => showView("home"));
+  $("btnBackHome2")?.addEventListener("click", () => showView("home"));
+
+  // Language toggle button
+  $("btnLang")?.addEventListener("click", () => {
+    state.lang = state.lang === "ar" ? "en" : "ar";
+    persist();
+    applyUI();
   });
 
-  // Manual refresh forces a new daily gold fetch
-  $("btnRefresh")?.addEventListener("click", () => refreshAll({ forceGold: true }));
-
+  // Karat buttons
   document.querySelectorAll(".karat-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const k = Number(btn.dataset.karat);
-      if (![18, 21, 22, 24].includes(k)) return;
-      state.karat = k;
+      state.karat = Number(btn.dataset.karat);
       persist();
       applyUI();
-      refreshAll({ forceGold: false });
     });
   });
 
+  // Calculator grams input
   $("gramsInput")?.addEventListener("input", updateTotal);
 }
 
 (function init() {
+  // Service worker
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(console.warn);
   }
-  bindEvents();
-  applyUI();
-  refreshAll({ forceGold: false });
 
-  // Optional: run once per day (not per second)
-  setInterval(() => refreshAll({ forceGold: false }).catch(() => {}), 24 * 60 * 60 * 1000);
+  initEvents();
+  applyUI();      // initial render (with cached state)
+  refreshNow();   // fetch immediately
+  startAutoRefresh();
 })();
