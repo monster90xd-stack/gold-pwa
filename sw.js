@@ -1,4 +1,4 @@
-const CACHE_NAME = "gcc-gold-pwa-v5";
+const CACHE_NAME = "gcc-gold-pwa-v6";
 
 const ASSETS = [
   "./",
@@ -30,7 +30,7 @@ self.addEventListener("fetch", (event) => {
   const req = event.request;
   const url = new URL(req.url);
 
-  // only handle same-origin requests (don’t cache API calls)
+  // Only cache same-origin app shell; never intercept API calls.
   if (url.origin !== self.location.origin) return;
 
   event.respondWith(
