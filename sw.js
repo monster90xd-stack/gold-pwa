@@ -1,4 +1,5 @@
-const CACHE_NAME = "gcc-gold-pwa-v13";
+// Bump cache name to ensure clients update
+const CACHE_NAME = "gcc-gold-pwa-v6";
 
 const ASSETS = [
   "./",
@@ -11,25 +12,23 @@ const ASSETS = [
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
+  );
   self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.map((k) => (k === CACHE_NAME ? null : caches.delete(k))))
+      Promise.all(keys.map((k) => (k !== CACHE_NAME ? caches.delete(k) : null)))
     )
   );
   self.clients.claim();
 });
 
 self.addEventListener("fetch", (event) => {
-  const req = event.request;
-  const url = new URL(req.url);
-
-  // Only cache same-origin app shell; never intercept API calls
-  if (url.origin !== self.location.origin) return;
-
-  event.respondWith(caches.match(req).then((cached) => cached || fetch(req)));
+  event.respondWith(
+    caches.match(event.request).then((cached) => cached || fetch(event.request))
+  );
 });
