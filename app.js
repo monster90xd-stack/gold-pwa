@@ -1,30 +1,33 @@
-// GCC Gold - TRUE month-to-date chart (server history via Cloudflare Worker KV)
+// GCC Gold - Full app.js (TRUE month-to-date chart from server history)
+// - Uses Cloudflare Worker endpoints:
+//     /latest
+//     /history/month
+// - X-axis shows DAYS only
+// - Tooltip shows full date+time + price
+// - More accurate bucketing: prefers API `timestamp` if present
+// - DOES NOT fetch on every page reload: fetch only if stale (>= 10 min), otherwise wait for timer
+// - Auto-refresh every 10 minutes
+// - Currency change re-renders chart immediately and then refreshes in background
 //
-// Requires your Worker endpoints:
-//   - https://gcc-gold-cache.monster-90xd.workers.dev/latest
-//   - https://gcc-gold-cache.monster-90xd.workers.dev/history/month
-//
-// UI assumptions (ids exist in your index.html):
+// Required element IDs in index.html:
 // btnLang, tabHome, tabCalc, tabCurrency
 // viewHome, viewCalc, viewCurrency
 // lblCurrentPrice, pricePerGramLabel, lblCurrency, currencyLabel, btnCurrency
 // karatLabel, calcKaratLabel, calcPricePerGramLabel
 // gramsInput, totalLabel
-// lblUpdatedWrap (we replace innerHTML), lblChartTitle, lblKarat
+// lblUpdatedWrap, lblChartTitle, lblKarat
 // lblPricePerGramCalc, lblGrams, lblTotal, btnBackHome1, btnBackHome2, lblChooseCurrency
 // currencyList, priceChart
 // adTitle (optional)
-//
-// Notes:
-// - "True month" means: month points come from your Worker KV, not device local storage.
-// - Graph updates on the 10-minute refresh schedule (and on currency/karat change for values).
-// - Label shows: Latest update time + Next update time.
 
 const WORKER_BASE_URL = "https://gcc-gold-cache.monster-90xd.workers.dev";
 const LATEST_URL = `${WORKER_BASE_URL}/latest`;
 const MONTH_HISTORY_URL = `${WORKER_BASE_URL}/history/month`;
 
-const AUTO_REFRESH_MS = 10 * 60 * 1000; // 10 minutes (matches your Basic plan delay + worker TTL)
+const AUTO_REFRESH_MS = 10 * 60 * 1000; // 10 minutes
+const STALE_AFTER_MS = 10 * 60 * 1000;  // don't refetch on reload unless >=10 minutes old
+const BUCKET_MS = 10 * 60 * 1000;       // server buckets should match (10 minutes)
+
 const TROY_OUNCE_GRAMS = 31.1034768;
 
 const GCC = [
@@ -48,17 +51,14 @@ const state = {
   karat: Number(localStorage.getItem("karat") || DEFAULTS.karat),
   lang: localStorage.getItem("lang") || DEFAULTS.lang,
 
-  // latest FX (CUR per USD) from /latest, used for the big price tiles
   usdToCurrency: Number(localStorage.getItem("usdToCurrency") || 1),
+  price24PerGram: Number(localStorage.getItem("price24PerGram") || 0),
 
-  // derived: 24k price per gram in selected currency (current)
-  price24PerGram: 0,
-
-  // when we last refreshed (app time)
   lastUpdatedAt: Number(localStorage.getItem("lastUpdatedAt") || 0),
 
-  // true month points from server
-  // each point: { t: number, rates: { USDXAU, AED, SAR, ... } }
+  // true month points from server:
+  // normalized to include _timeMs used for bucketing
+  // [{ t, rates, timestamp?, _timeMs }]
   monthPoints: []
 };
 
@@ -70,8 +70,16 @@ function persist() {
   localStorage.setItem("currency", state.currency);
   localStorage.setItem("karat", String(state.karat));
   localStorage.setItem("lang", state.lang);
+
   localStorage.setItem("usdToCurrency", String(state.usdToCurrency || 1));
+  localStorage.setItem("price24PerGram", String(state.price24PerGram || 0));
+
   localStorage.setItem("lastUpdatedAt", String(state.lastUpdatedAt || 0));
+}
+
+function isStale() {
+  if (!state.lastUpdatedAt) return true;
+  return (Date.now() - state.lastUpdatedAt) >= STALE_AFTER_MS;
 }
 
 function fmtMoney(value, currency) {
@@ -97,6 +105,31 @@ function nextUpdateAt() {
 }
 
 function karatFactor(k) { return k / 24; }
+
+function pointTimeMs(p) {
+  // Prefer API timestamp if present (seconds -> ms)
+  const tsSec = p?.timestamp ?? p?.rates?.timestamp;
+  if (Number.isFinite(tsSec) && tsSec > 0) return tsSec * 1000;
+
+  // Fallback to worker time
+  if (Number.isFinite(p?.t) && p.t > 0) return p.t;
+
+  return 0;
+}
+
+function usdToCurFromRates(rates, cur) {
+  if (cur === "USD") return 1;
+
+  // Preferred: CUR per USD (Metalprice base=USD)
+  const direct = rates?.[cur];
+  if (Number.isFinite(direct) && direct > 0) return direct;
+
+  // Fallback: USD<cur> is USD per CUR -> invert
+  const inv = rates?.[`USD${cur}`];
+  if (Number.isFinite(inv) && inv > 0) return 1 / inv;
+
+  return NaN;
+}
 
 function showView(tab) {
   const map = { home: "viewHome", calc: "viewCalc", currency: "viewCurrency" };
@@ -193,10 +226,10 @@ function renderCurrencyList() {
       state.currency = c.code;
       persist();
 
-      // Update chart values immediately (it will re-convert each stored point to new currency)
+      // Immediate UI re-render (chart converts points to new currency)
       applyUI();
 
-      // Fetch latest + month points again (worker cached; cheap)
+      // Refresh in background (worker cached; cheap)
       await refreshNow();
       showView("home");
     });
@@ -221,7 +254,13 @@ async function fetchMonthHistory() {
     throw new Error(`History error ${res.status}: ${text}`);
   }
   const json = await res.json();
-  return Array.isArray(json?.points) ? json.points : [];
+  const pts = Array.isArray(json?.points) ? json.points : [];
+
+  // Normalize to include accurate _timeMs
+  return pts
+    .map((p) => ({ ...p, _timeMs: pointTimeMs(p) }))
+    .filter((p) => p._timeMs > 0)
+    .sort((a, b) => a._timeMs - b._timeMs);
 }
 
 function renderChart() {
@@ -235,44 +274,28 @@ function renderChart() {
   const d = new Date();
   const monthStart = new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0).getTime();
 
-  const BUCKET_MS = 10 * 60 * 1000;
   const startBucket = Math.floor(monthStart / BUCKET_MS) * BUCKET_MS;
   const endBucket = Math.floor(now / BUCKET_MS) * BUCKET_MS;
 
-  // Timeline: every 10 minutes from 1st to now
+  // Fixed timeline: every 10 minutes from 1st to now
   const timeline = [];
   for (let t = startBucket; t <= endBucket; t += BUCKET_MS) timeline.push(t);
 
-  // Build bucket->rates map from server points
-  const points = Array.isArray(state.monthPoints) ? state.monthPoints : [];
+  // Map bucket -> rates, using accurate point time
   const bucketToRates = new Map();
+  const points = Array.isArray(state.monthPoints) ? state.monthPoints : [];
   for (const p of points) {
-    const bt = Math.floor(p.t / BUCKET_MS) * BUCKET_MS;
+    const bt = Math.floor(p._timeMs / BUCKET_MS) * BUCKET_MS;
     bucketToRates.set(bt, p.rates);
   }
 
-  function usdToCurFromRates(rates, cur) {
-    if (cur === "USD") return 1;
-
-    const direct = rates?.[cur]; // CUR per USD
-    if (Number.isFinite(direct) && direct > 0) return direct;
-
-    const inv = rates?.[`USD${cur}`]; // USD per CUR
-    if (Number.isFinite(inv) && inv > 0) return 1 / inv;
-
-    return NaN;
-  }
-
-  // X-axis labels: DAYS ONLY.
-  // We keep one label per bucket internally, but return empty string for non-midnight points,
-  // so the axis shows only day markers.
+  // X labels: DAYS only (show label at midnight, blank otherwise)
   const labels = timeline.map((t) => {
     const dt = new Date(t);
     const isMidnight = dt.getHours() === 0 && dt.getMinutes() === 0;
     return isMidnight ? dt.toLocaleDateString([], { month: "short", day: "2-digit" }) : "";
   });
 
-  // Data points (null for missing buckets -> gaps)
   const data = timeline.map((t) => {
     const rates = bucketToRates.get(t);
     if (!rates) return null;
@@ -291,8 +314,6 @@ function renderChart() {
   const knownCount = data.reduce((n, v) => (v == null ? n : n + 1), 0);
   const fewKnown = knownCount <= 2;
 
-  // Mobile friendly: larger touch area, less dense ticks, no points (except when few points),
-  // and allow "nearest" interaction.
   const config = {
     type: "line",
     data: {
@@ -306,7 +327,7 @@ function renderChart() {
         fill: true,
         borderWidth: 2.5,
         pointRadius: fewKnown ? 4 : 0,
-        pointHitRadius: 18,     // easier touch
+        pointHitRadius: 18,
         pointHoverRadius: 6,
         spanGaps: false
       }]
@@ -314,20 +335,13 @@ function renderChart() {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      animation: false, // smoother on low-end phones
-      interaction: {
-        mode: "nearest",
-        intersect: false
-      },
+      animation: false,
+      interaction: { mode: "nearest", intersect: false },
       plugins: {
-        legend: {
-          display: true,
-          labels: { color: "#e8eefc", boxWidth: 10, boxHeight: 10 }
-        },
+        legend: { labels: { color: "#e8eefc", boxWidth: 10, boxHeight: 10 } },
         tooltip: {
           displayColors: false,
           callbacks: {
-            // Tooltip title: show full date + time for the hovered bucket
             title: (items) => {
               if (!items?.length) return "";
               const idx = items[0].dataIndex;
@@ -339,7 +353,6 @@ function renderChart() {
                 minute: "2-digit"
               });
             },
-            // Tooltip label: show price only (already includes currency)
             label: (ctx) => fmtMoney(ctx.parsed.y, state.currency)
           }
         }
@@ -348,7 +361,7 @@ function renderChart() {
         x: {
           ticks: {
             color: "#9bb0d4",
-            autoSkip: false, // we already blank most labels; keep day labels
+            autoSkip: false, // we already blank most labels
             maxRotation: 0,
             padding: 8,
             font: { size: 12, weight: "700" }
@@ -367,9 +380,8 @@ function renderChart() {
     }
   };
 
-  if (!chart) {
-    chart = new Chart(ctx, config);
-  } else {
+  if (!chart) chart = new Chart(ctx, config);
+  else {
     chart.data.labels = labels;
     chart.data.datasets[0].data = data;
     chart.data.datasets[0].label = `${state.karat}K (${state.currency})`;
@@ -394,13 +406,13 @@ function applyUI() {
 
 async function refreshNow() {
   try {
-    // 1) Latest (tile values + update times)
+    // 1) Latest (current tiles)
     const latest = await fetchLatestRates();
 
     const usdXau = latest?.rates?.USDXAU;
     if (!Number.isFinite(usdXau) || usdXau <= 0) throw new Error("Missing USDXAU rate");
 
-    const usdToCur = state.currency === "USD" ? 1 : latest?.rates?.[state.currency];
+    const usdToCur = usdToCurFromRates(latest?.rates, state.currency);
     if (!Number.isFinite(usdToCur) || usdToCur <= 0) throw new Error(`Missing ${state.currency} rate`);
 
     state.usdToCurrency = usdToCur;
@@ -411,7 +423,7 @@ async function refreshNow() {
     state.lastUpdatedAt = Date.now();
     persist();
 
-    // 2) True month points (server)
+    // 2) True month history (server KV)
     state.monthPoints = await fetchMonthHistory();
 
     applyUI();
@@ -424,9 +436,8 @@ async function refreshNow() {
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
 
-  // When app becomes visible again, do a refresh
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") refreshNow();
+    if (document.visibilityState === "visible" && isStale()) refreshNow();
   });
 
   refreshTimer = setInterval(refreshNow, AUTO_REFRESH_MS);
@@ -438,12 +449,12 @@ function initEvents() {
     btn.addEventListener("click", () => showView(btn.dataset.tab));
   });
 
-  // Currency view
+  // Navigation buttons
   $("btnCurrency")?.addEventListener("click", () => showView("currency"));
   $("btnBackHome1")?.addEventListener("click", () => showView("home"));
   $("btnBackHome2")?.addEventListener("click", () => showView("home"));
 
-  // Language
+  // Language toggle
   $("btnLang")?.addEventListener("click", () => {
     state.lang = state.lang === "ar" ? "en" : "ar";
     persist();
@@ -455,11 +466,11 @@ function initEvents() {
     btn.addEventListener("click", () => {
       state.karat = Number(btn.dataset.karat);
       persist();
-      applyUI(); // chart re-converts immediately
+      applyUI();
     });
   });
 
-  // Calculator grams input
+  // Calculator
   $("gramsInput")?.addEventListener("input", updateTotal);
 }
 
@@ -469,7 +480,12 @@ function initEvents() {
   }
 
   initEvents();
-  applyUI();   // initial render (blank chart until loaded)
-  refreshNow();
+
+  // Render immediately from cached values (no network)
+  applyUI();
+
+  // Only fetch on load if stale (prevents refresh spam on reload)
+  if (isStale()) refreshNow();
+
   startAutoRefresh();
 })();
